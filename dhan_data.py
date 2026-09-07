@@ -10,8 +10,7 @@ import requests
 
 API = "https://api.dhan.co/v2"
 MASTER_URL = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
-NIFTY_ID = "13"
-STRIKE_STEP = 50
+NIFTY_ID = 13
 IST = "Asia/Kolkata"
 DATA_DIR = Path("data")
 
@@ -34,7 +33,10 @@ class DhanClient:
             try:
                 r = self.session.post(f"{API}{path}", json=payload, timeout=90)
                 if r.status_code in (429, 500, 502, 503, 504):
-                    raise RuntimeError(f"Dhan HTTP {r.status_code}: {r.text[:300]}")
+                    last = RuntimeError(f"Dhan HTTP {r.status_code}: {r.text[:300]}")
+                    import time
+                    time.sleep(min(2 ** attempt, 10))
+                    continue
                 r.raise_for_status()
                 body = r.json()
                 if isinstance(body, dict) and str(body.get("status", "")).lower() == "failure":
@@ -50,7 +52,6 @@ class DhanClient:
 
 def fetch_instrument_master() -> pd.DataFrame:
     df = pd.read_csv(MASTER_URL, low_memory=False)
-    rename = {}
     aliases = {
         "SECURITY_ID": "SECURITY_ID",
         "SEM_SECURITY_ID": "SECURITY_ID",
@@ -63,9 +64,11 @@ def fetch_instrument_master() -> pd.DataFrame:
         "OPTION_TYPE": "OPTION_TYPE",
         "SEM_OPTION_TYPE": "OPTION_TYPE",
     }
-    for col in df.columns:
-        if str(col).upper().strip() in aliases:
-            rename[col] = aliases[str(col).upper().strip()]
+    rename = {
+        col: aliases[str(col).upper().strip()]
+        for col in df.columns
+        if str(col).upper().strip() in aliases
+    }
     df = df.rename(columns=rename)
     required = {"SECURITY_ID", "UNDERLYING_SECURITY_ID", "EXPIRY", "STRIKE", "OPTION_TYPE", "EXPIRY_FLAG"}
     missing = required - set(df.columns)
@@ -82,20 +85,18 @@ def fetch_instrument_master() -> pd.DataFrame:
 
 def available_expiries(master: pd.DataFrame, start: date, end: date) -> list[date]:
     q = master[
-        (master["UNDERLYING_SECURITY_ID"] == NIFTY_ID)
+        (master["UNDERLYING_SECURITY_ID"] == str(NIFTY_ID))
         & master["OPTION_TYPE"].isin(["CE", "PE"])
         & master["EXPIRY_FLAG"].eq("W")
         & master["EXPIRY"].notna()
     ]
-    return sorted(x for x in q["EXPIRY"].unique().tolist() if start <= x <= end)
+    return sorted(x for x in q["EXPIRY"].dropna().unique().tolist() if start <= x <= end)
 
 
 def expiry_for_session(ts: pd.Timestamp, expiries: list[date]) -> date | None:
     d = ts.date()
-    for exp in expiries:
-        if exp >= d:
-            return exp
-    return None
+    future = [exp for exp in expiries if exp >= d]
+    return min(future) if future else None
 
 
 def rolling_call(client: DhanClient, start: date, end_exclusive: date, offset: int, side: str) -> pd.DataFrame:
@@ -104,7 +105,7 @@ def rolling_call(client: DhanClient, start: date, end_exclusive: date, offset: i
     payload = {
         "exchangeSegment": "NSE_FNO",
         "interval": "1",
-        "securityId": 13,
+        "securityId": NIFTY_ID,
         "instrument": "OPTIDX",
         "expiryFlag": "WEEK",
         "expiryCode": 1,
@@ -125,8 +126,9 @@ def rolling_call(client: DhanClient, start: date, end_exclusive: date, offset: i
         values = block.get(key)
         return values if isinstance(values, list) else [None] * n
 
-    out = pd.DataFrame({
-        "timestamp": pd.to_datetime(ts, unit="s", utc=True).tz_convert(IST),
+    timestamp = pd.to_datetime(ts, unit="s", utc=True).tz_convert(IST)
+    return pd.DataFrame({
+        "timestamp": timestamp,
         "open": arr("open"),
         "high": arr("high"),
         "low": arr("low"),
@@ -140,7 +142,6 @@ def rolling_call(client: DhanClient, start: date, end_exclusive: date, offset: i
         "strike_offset": offset,
         "moneyness": "ATM" if offset == 0 else f"ATM{offset:+d}",
     })
-    return out
 
 
 def chunks(start: date, end_exclusive: date, days: int = 30):
@@ -171,10 +172,15 @@ class HistoricalCollector:
         sides: list[str],
         progress: Callable[[int, int, str], None] | None = None,
     ) -> FetchResult:
-        requested = min(strike_range, 20)
+        requested = min(max(strike_range, 1), 20)
         native = min(requested, 10)
         windows = list(chunks(start, end + timedelta(days=1), 30))
-        jobs = [(a, b, offset, side) for a, b in windows for side in sides for offset in range(-native, native + 1)]
+        jobs = [
+            (a, b, offset, side)
+            for a, b in windows
+            for side in sides
+            for offset in range(-native, native + 1)
+        ]
         total = len(jobs)
         done = 0
         errors: list[str] = []
@@ -199,7 +205,11 @@ class HistoricalCollector:
                 errors.append(f"{a}→{b} {side} ATM{offset:+d}: {exc}")
             done += 1
             if progress:
-                progress(done, total, f"Fetching {side} ATM{offset:+d} • {a:%d-%b-%Y} → {b:%d-%b-%Y} • {done}/{total}")
+                progress(
+                    done,
+                    total,
+                    f"Fetching {side} ATM{offset:+d} • {a:%d-%b-%Y} → {b:%d-%b-%Y} • {done}/{total}",
+                )
 
         frames = []
         for path in output_files:
@@ -211,5 +221,9 @@ class HistoricalCollector:
             return FetchResult(pd.DataFrame(), errors)
         df = pd.concat(frames, ignore_index=True)
         df = df[(df["timestamp"].dt.date >= start) & (df["timestamp"].dt.date <= end)]
-        df = df.drop_duplicates(["timestamp", "option_type", "strike_offset"]).sort_values(["timestamp", "option_type", "strike_offset"])
-        return FetchResult(df.reset_index(drop=True), errors)
+        df = (
+            df.drop_duplicates(["timestamp", "option_type", "strike_offset"])
+            .sort_values(["timestamp", "option_type", "strike_offset"])
+            .reset_index(drop=True)
+        )
+        return FetchResult(df, errors)
