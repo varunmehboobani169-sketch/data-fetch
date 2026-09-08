@@ -55,6 +55,8 @@ class DhanClient:
         data = body.get("data") or {}
         idx = data.get("IDX_I") or {}
         value = idx.get(NIFTY_ID)
+        if value is None:
+            value = idx.get(int(NIFTY_ID))
         if isinstance(value, dict):
             value = value.get("last_price")
         if value is None:
@@ -62,8 +64,8 @@ class DhanClient:
         return float(value)
 
     def option_ltps(self, security_ids: list[str]) -> dict[str, float]:
-        """Return current LTP for NSE F&O security IDs in one batched request."""
-        ids = [str(x) for x in security_ids if str(x).strip()]
+        """Return current NSE F&O LTPs, normalizing string/int response keys."""
+        ids = [str(x).strip() for x in security_ids if str(x).strip()]
         if not ids:
             return {}
         body = self.post("/marketfeed/ltp", {"NSE_FNO": [int(x) for x in ids]}, retries=2)
@@ -71,8 +73,14 @@ class DhanClient:
         out: dict[str, float] = {}
         for sid in ids:
             item = block.get(sid)
-            if isinstance(item, dict) and item.get("last_price") is not None:
-                out[sid] = float(item["last_price"])
+            if item is None:
+                item = block.get(int(sid))
+            if isinstance(item, dict):
+                value = item.get("last_price")
+            else:
+                value = item
+            if value is not None:
+                out[sid] = float(value)
         return out
 
 
@@ -122,12 +130,7 @@ def expiry_for_session(ts: pd.Timestamp, expiries: list[date]) -> date | None:
 
 
 def strike_contracts(master: pd.DataFrame, expiry: date, strikes: list[float], sides: list[str]) -> pd.DataFrame:
-    q = master[
-        (master["UNDERLYING_SECURITY_ID"] == NIFTY_ID)
-        & master["EXPIRY"].eq(expiry)
-        & master["OPTION_TYPE"].isin(sides)
-        & master["STRIKE"].isin(strikes)
-    ].copy()
+    q = master[(master["UNDERLYING_SECURITY_ID"] == NIFTY_ID) & master["EXPIRY"].eq(expiry) & master["OPTION_TYPE"].isin(sides) & master["STRIKE"].isin(strikes)].copy()
     return q[["SECURITY_ID", "EXPIRY", "STRIKE", "OPTION_TYPE"]].drop_duplicates()
 
 
