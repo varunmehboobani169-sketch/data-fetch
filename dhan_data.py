@@ -16,7 +16,6 @@ DATA_DIR = Path("data")
 
 
 def _normalise_security_id(series: pd.Series) -> pd.Series:
-    """Normalize Dhan security IDs so CSV numeric values such as 13.0 become '13'."""
     numeric = pd.to_numeric(series, errors="coerce")
     return numeric.map(lambda x: str(int(x)) if pd.notna(x) and float(x).is_integer() else str(x).strip())
 
@@ -34,16 +33,11 @@ class DhanClient:
             "client-id": self.client_id,
         })
 
-    def post(self, path: str, payload: dict, retries: int = 4) -> dict:
+    def post(self, path: str, payload: dict, retries: int = 2) -> dict:
         last: Exception | None = None
         for attempt in range(retries):
             try:
-                r = self.session.post(f"{API}{path}", json=payload, timeout=90)
-                if r.status_code in (429, 500, 502, 503, 504):
-                    last = RuntimeError(f"Dhan HTTP {r.status_code}: {r.text[:300]}")
-                    import time
-                    time.sleep(min(2 ** attempt, 10))
-                    continue
+                r = self.session.post(f"{API}{path}", json=payload, timeout=30)
                 r.raise_for_status()
                 body = r.json()
                 if isinstance(body, dict) and str(body.get("status", "")).lower() == "failure":
@@ -53,41 +47,17 @@ class DhanClient:
                 last = exc
                 if attempt + 1 < retries:
                     import time
-                    time.sleep(min(2 ** attempt, 10))
+                    time.sleep(1)
         raise last or RuntimeError("Dhan request failed")
 
-    def nifty_ltp(self) -> float:
-        body = self.post("/marketfeed/ltp", {"IDX_I": [int(NIFTY_ID)]}, retries=2)
-        data = body.get("data") or {}
-        idx = data.get("IDX_I") or {}
-        value = idx.get(NIFTY_ID)
-        if value is None:
-            value = idx.get(int(NIFTY_ID))
-        if isinstance(value, dict):
-            value = value.get("last_price")
-        if value is None:
-            raise RuntimeError("Dhan did not return NIFTY LTP")
-        return float(value)
+    def expiry_list(self) -> list[str]:
+        body = self.post("/optionchain/expirylist", {"UnderlyingScrip": int(NIFTY_ID), "UnderlyingSeg": "IDX_I"})
+        values = (body.get("data") or []) if isinstance(body, dict) else []
+        return [str(x) for x in values]
 
-    def option_ltps(self, security_ids: list[str]) -> dict[str, float]:
-        """Return current NSE F&O LTPs, normalizing string/int response keys."""
-        ids = [str(x).strip() for x in security_ids if str(x).strip()]
-        if not ids:
-            return {}
-        body = self.post("/marketfeed/ltp", {"NSE_FNO": [int(x) for x in ids]}, retries=2)
-        block = (body.get("data") or {}).get("NSE_FNO") or {}
-        out: dict[str, float] = {}
-        for sid in ids:
-            item = block.get(sid)
-            if item is None:
-                item = block.get(int(sid))
-            if isinstance(item, dict):
-                value = item.get("last_price")
-            else:
-                value = item
-            if value is not None:
-                out[sid] = float(value)
-        return out
+    def option_chain(self, expiry: str) -> dict:
+        body = self.post("/optionchain", {"UnderlyingScrip": int(NIFTY_ID), "UnderlyingSeg": "IDX_I", "Expiry": expiry})
+        return body.get("data") or {}
 
 
 def fetch_instrument_master() -> pd.DataFrame:
@@ -101,9 +71,6 @@ def fetch_instrument_master() -> pd.DataFrame:
         "SEM_EXPIRY_DATE": "EXPIRY",
         "SM_EXPIRY_DATE": "EXPIRY",
         "EXPIRY_DATE": "EXPIRY",
-        "SEM_EXPIRY_FLAG": "EXPIRY_FLAG",
-        "EXPIRY_FLAG": "EXPIRY_FLAG",
-        "SM_EXPIRY_FLAG": "EXPIRY_FLAG",
         "STRIKE_PRICE": "STRIKE",
         "SEM_STRIKE_PRICE": "STRIKE",
         "OPTION_TYPE": "OPTION_TYPE",
@@ -112,41 +79,25 @@ def fetch_instrument_master() -> pd.DataFrame:
     }
     rename = {col: aliases[str(col).upper().strip()] for col in df.columns if str(col).upper().strip() in aliases}
     df = df.rename(columns=rename)
-
     required = {"SECURITY_ID", "UNDERLYING_SECURITY_ID", "EXPIRY", "STRIKE", "OPTION_TYPE"}
     missing = required - set(df.columns)
     if missing:
         raise RuntimeError(f"Instrument master is missing: {sorted(missing)}")
-
     df["SECURITY_ID"] = _normalise_security_id(df["SECURITY_ID"])
     df["UNDERLYING_SECURITY_ID"] = _normalise_security_id(df["UNDERLYING_SECURITY_ID"])
     df["EXPIRY"] = pd.to_datetime(df["EXPIRY"], errors="coerce").dt.date
     df["STRIKE"] = pd.to_numeric(df["STRIKE"], errors="coerce")
     df["OPTION_TYPE"] = df["OPTION_TYPE"].astype(str).str.upper().str.strip()
-    if "EXPIRY_FLAG" in df.columns:
-        df["EXPIRY_FLAG"] = df["EXPIRY_FLAG"].astype(str).str.upper().str.strip()
-    else:
-        df["EXPIRY_FLAG"] = ""
     return df
 
 
-def _nifty_option_rows(master: pd.DataFrame) -> pd.DataFrame:
+def available_expiries(master: pd.DataFrame, start: date, end: date) -> list[date]:
     q = master[
         master["UNDERLYING_SECURITY_ID"].eq(NIFTY_ID)
         & master["OPTION_TYPE"].isin(["CE", "PE"])
         & master["EXPIRY"].notna()
-        & master["STRIKE"].notna()
-    ].copy()
-    return q
-
-
-def available_expiries(master: pd.DataFrame, start: date, end: date) -> list[date]:
-    q = _nifty_option_rows(master)
-    # Dhan's master has changed the exact spelling/value used for the expiry flag
-    # across revisions. For the live dashboard, the nearest future NIFTY option
-    # expiry is the relevant weekly cycle, so do not depend on EXPIRY_FLAG == "W".
-    values = [x for x in q["EXPIRY"].dropna().unique().tolist() if start <= x <= end]
-    return sorted(values)
+    ]
+    return sorted(x for x in q["EXPIRY"].dropna().unique().tolist() if start <= x <= end)
 
 
 def nearest_weekly_expiry(master: pd.DataFrame, on_date: date) -> date | None:
