@@ -2,17 +2,13 @@ from __future__ import annotations
 
 from datetime import date
 
+import pandas as pd
 import streamlit as st
 
-from dhan_data import DhanClient
+from dhan_data import DhanClient, fetch_instrument_master, nearest_weekly_expiry, strike_contracts
 from regime_engine import MarketInputs, classify
 
-st.set_page_config(
-    page_title="NIFTY Intraday Option Selling Engine",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="NIFTY Intraday Option Selling Engine", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
@@ -25,14 +21,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 CLIENT_ID = "1113195747"
-for key, default in {
-    "dhan_client_id": CLIENT_ID,
-    "dhan_token": "",
-    "connected": False,
-    "live_mode": False,
-    "live_nifty": None,
-    "live_error": "",
-}.items():
+for key, default in {"dhan_token": "", "connected": False, "live_mode": False, "live_nifty": None, "live_error": ""}.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -41,7 +30,6 @@ with st.sidebar:
     st.caption("Client ID is fixed to 1113195747. Access Token stays only in this Streamlit session.")
     st.text_input("Dhan Client ID", value=CLIENT_ID, disabled=True)
     tok = st.text_input("Dhan Access Token", value=st.session_state.dhan_token, type="password")
-
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Connect", type="primary", use_container_width=True):
@@ -56,8 +44,8 @@ with st.sidebar:
             st.session_state.live_nifty = None
             st.session_state.live_error = ""
             st.rerun()
-
     st.success("Dhan session ready") if st.session_state.connected else st.info("Disconnected")
+
     st.divider()
     st.header("Engine Controls")
     mode = st.radio("Data mode", ["Historical", "Live"], horizontal=True)
@@ -81,8 +69,6 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Live NIFTY value. The value shown as "NIFTY LTP" is the latest traded price
-# returned by Dhan's market-feed endpoint, not a hard-coded/sample value.
 live_nifty = None
 live_error = ""
 if st.session_state.connected and st.session_state.dhan_token:
@@ -100,18 +86,12 @@ else:
 
 atm = round(live_nifty / 50) * 50 if live_nifty is not None else None
 
-proto = MarketInputs(
-    trend_score=0.05,
-    realized_vol_percentile=38,
-    iv_percentile=72,
-    iv_change=-0.35,
-    theta_vega=0.34,
-)
+proto = MarketInputs(trend_score=0.05, realized_vol_percentile=38, iv_percentile=72, iv_change=-0.35, theta_vega=0.34)
 result = classify(proto)
 
 c0, c1, c2, c3, c4, c5 = st.columns(6)
 if live_nifty is not None:
-    c0.metric("NIFTY LTP", f"{live_nifty:,.2f}", "Live from Dhan")
+    c0.metric("NIFTY LTP", f"₹{live_nifty:,.2f}", "Live from Dhan")
     c1.metric("ATM", f"{atm:,.0f}")
 else:
     c0.metric("NIFTY LTP", "—", "Not connected")
@@ -134,20 +114,14 @@ with left:
     b.metric("IV Percentile", f"{proto.iv_percentile:.0f}%", "Prototype")
     c.metric("IV Change", f"{proto.iv_change:+.2f}", "Prototype")
     d.metric("Realized Vol", f"{proto.realized_vol_percentile:.0f}th pct", "Prototype")
-
     st.markdown("### 🎯 Selling Score")
     st.progress(result.selling_score / 100)
     s1, s2, s3 = st.columns(3)
     s1.metric("Score", f"{result.selling_score} / 100")
     s2.metric("Regime", result.regime)
     s3.metric("Action", result.action)
-
     st.markdown('<div class="section">Market Regime Decision Tree</div>', unsafe_allow_html=True)
-    st.dataframe({
-        "Engine": ["Trend", "Realized Vol", "IV", "Theta/Vega"],
-        "Reading": ["Neutral / Sideways", f"{proto.realized_vol_percentile:.0f}th percentile", f"{proto.iv_percentile:.0f}th percentile • {proto.iv_change:+.2f}", f"{proto.theta_vega:.2f}x"],
-        "Interpretation": [result.regime, "Contained" if proto.realized_vol_percentile < 50 else "Elevated", "Falling" if proto.iv_change < 0 else "Rising", "Favorable" if proto.theta_vega >= 0.30 else "Selective"],
-    }, use_container_width=True, hide_index=True)
+    st.dataframe({"Engine": ["Trend", "Realized Vol", "IV", "Theta/Vega"], "Reading": ["Neutral / Sideways", f"{proto.realized_vol_percentile:.0f}th percentile", f"{proto.iv_percentile:.0f}th percentile • {proto.iv_change:+.2f}", f"{proto.theta_vega:.2f}x"], "Interpretation": [result.regime, "Contained" if proto.realized_vol_percentile < 50 else "Elevated", "Falling" if proto.iv_change < 0 else "Rising", "Favorable" if proto.theta_vega >= 0.30 else "Selective"]}, use_container_width=True, hide_index=True)
 
 with right:
     st.markdown('<div class="section">⚡ Strategy Selection</div>', unsafe_allow_html=True)
@@ -169,13 +143,33 @@ with right:
         st.write(f"• {reason}")
 
 st.markdown("---")
-st.markdown('<div class="section">🏆 Strike Ranking — Prototype Layout</div>', unsafe_allow_html=True)
-offsets = [4, 3, -4, -5, 5, -6]
-if atm is not None:
-    options = [f"{atm + o*50:,.0f} CE" if o > 0 else f"{atm + o*50:,.0f} PE" for o in offsets]
-else:
-    options = ["Connect to Dhan to resolve strikes"] * 6
-st.dataframe({"Rank": [1,2,3,4,5,6], "Option": options, "Offset": offsets, "Theta": ["+2.18","+2.04","+2.11","+1.94","+1.82","+1.75"], "Vega": ["0.64","0.71","0.68","0.73","0.79","0.81"], "Theta/Vega": [3.41,2.87,3.10,2.66,2.30,2.16], "Sell Score": [94,90,92,86,79,75], "Status": ["Preferred","Strong","Preferred","Strong","Watch","Watch"]}, use_container_width=True, hide_index=True)
+st.markdown('<div class="section">🏆 Strike Ranking — Live Premiums</div>', unsafe_allow_html=True)
+ranking_offsets = [4, 3, -4, -5, 5, -6]
+ranking_sides = ["CE", "CE", "PE", "PE", "CE", "PE"]
+
+ltp_map: dict[str, float] = {}
+contract_rows: list[dict] = []
+if atm is not None and st.session_state.connected and st.session_state.dhan_token:
+    try:
+        master = fetch_instrument_master()
+        exp_date = nearest_weekly_expiry(master, date.today())
+        strikes = [atm + offset * 50 for offset in ranking_offsets]
+        contracts = strike_contracts(master, exp_date, strikes, sorted(set(ranking_sides))) if exp_date else pd.DataFrame()
+        if not contracts.empty:
+            ids = contracts["SECURITY_ID"].astype(str).tolist()
+            ltp_map = client.option_ltps(ids)
+            contract_rows = [{"security_id": str(r.SECURITY_ID), "strike": float(r.STRIKE), "option_type": r.OPTION_TYPE, "expiry": r.EXPIRY} for r in contracts.itertuples(index=False)]
+    except Exception as exc:
+        st.warning(f"Could not load live option premiums: {exc}")
+
+rows = []
+for rank, offset, side in zip(range(1, 7), ranking_offsets, ranking_sides):
+    strike = atm + offset * 50 if atm is not None else None
+    match = next((x for x in contract_rows if x["strike"] == strike and x["option_type"] == side), None)
+    ltp = ltp_map.get(match["security_id"]) if match else None
+    rows.append({"Rank": rank, "Option": f"{strike:,.0f} {side}" if strike is not None else "—", "Expiry": str(match["expiry"]) if match else "—", "Offset": offset, "LTP": f"₹{ltp:,.2f}" if ltp is not None else "—", "Theta": "—", "Vega": "—", "Theta/Vega": "—", "Sell Score": "Prototype", "Status": "Awaiting Greeks"})
+st.dataframe(rows, use_container_width=True, hide_index=True)
+st.caption("LTP is live from Dhan's F&O market-quote endpoint. Greek columns remain disabled until the real option-chain Greek engine is connected.")
 
 ch1, ch2 = st.columns(2)
 with ch1:
