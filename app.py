@@ -5,7 +5,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from dhan_data import DhanClient, fetch_instrument_master, nearest_weekly_expiry, strike_contracts
+from dhan_data import DhanClient
 from regime_engine import MarketInputs, classify
 
 st.set_page_config(page_title="NIFTY Intraday Option Selling Engine", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
@@ -65,7 +65,7 @@ with st.sidebar:
 st.markdown("""
 <div class="hero">
   <h1 style="margin-bottom:4px;">📈 NIFTY Intraday Option Selling Engine</h1>
-  <div class="small">Theta + Vega + IV + market regime • regime-based paper-trading prototype</div>
+  <div class="small">Theta + Vega + IV + market regime • basic preferred-strike prototype</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -91,10 +91,10 @@ result = classify(proto)
 
 c0, c1, c2, c3, c4, c5 = st.columns(6)
 if live_nifty is not None:
-    c0.metric("NIFTY LTP", f"₹{live_nifty:,.2f}", "Live from Dhan")
+    c0.metric("NIFTY", f"₹{live_nifty:,.2f}", "Live from Dhan")
     c1.metric("ATM", f"{atm:,.0f}")
 else:
-    c0.metric("NIFTY LTP", "—", "Not connected")
+    c0.metric("NIFTY", "—", "Not connected")
     c1.metric("ATM", "—")
 c2.metric("Expiry", expiry_mode)
 c3.metric("Quote status", "Live" if live_nifty is not None else "Waiting")
@@ -102,9 +102,9 @@ c4.metric("Data", "1 min")
 c5.metric("Refresh", "On demand")
 
 if live_error:
-    st.error(f"Dhan LTP error: {live_error}")
+    st.error(f"Dhan NIFTY quote error: {live_error}")
 elif not st.session_state.connected:
-    st.info("Connect to Dhan in the left panel to populate the real NIFTY LTP and option prices.")
+    st.info("Connect to Dhan in the left panel to populate the real NIFTY level and preferred absolute strikes.")
 
 left, right = st.columns([1.55, 1])
 with left:
@@ -121,7 +121,7 @@ with left:
     s2.metric("Regime", result.regime)
     s3.metric("Action", result.action)
     st.markdown('<div class="section">Market Regime Decision Tree</div>', unsafe_allow_html=True)
-    st.dataframe({"Engine": ["Trend", "Realized Vol", "IV", "Theta/Vega"], "Reading": ["Neutral / Sideways", f"{proto.realized_vol_percentile:.0f}th percentile", f"{proto.iv_percentile:.0f}th percentile • {proto.iv_change:+.2f}", f"{proto.theta_vega:.2f}x"], "Interpretation": [result.regime, "Contained" if proto.realized_vol_percentile < 50 else "Elevated", "Falling" if proto.iv_change < 0 else "Rising", "Favorable" if proto.theta_vega >= 0.30 else "Selective"]}, use_container_width=True, hide_index=True)
+    st.dataframe({"Engine": ["Trend", "Realized Vol", "IV", "Theta/Vega"], "Reading": ["Neutral / Sideways", f"{proto.realized_vol_percentile:.0f}th percentile", f"{proto.iv_percentile:.0f}% • {proto.iv_change:+.2f}", f"{proto.theta_vega:.2f}x"], "Interpretation": [result.regime, "Contained" if proto.realized_vol_percentile < 50 else "Elevated", "Falling" if proto.iv_change < 0 else "Rising", "Favorable" if proto.theta_vega >= 0.30 else "Selective"]}, use_container_width=True, hide_index=True)
 
 with right:
     st.markdown('<div class="section">⚡ Strategy Selection</div>', unsafe_allow_html=True)
@@ -132,78 +132,54 @@ with right:
     else:
         st.error("AVOID NEW PREMIUM SELLING")
     st.write(f"**Preferred structure:** {result.preferred_strategy}")
-    st.write("**Strike selection:** dynamic around the actual NIFTY ATM")
+    st.write("**Strike selection:** dynamic around the current ATM")
     st.write("**Wings:** determined later by tested risk rules")
     st.divider()
     st.metric("Selling Score", f"{result.selling_score}/100")
     st.metric("Theta/Vega", f"{proto.theta_vega:.2f}x")
-    st.caption("Prototype strategy metrics only. No live orders are placed.")
+    st.caption("Option LTP is not used or displayed in Strike Ranking.")
     st.markdown("**Why this decision?**")
     for reason in result.reasons:
         st.write(f"• {reason}")
 
 st.markdown("---")
-st.markdown('<div class="section">🏆 Strike Ranking — Live Option Prices</div>', unsafe_allow_html=True)
+st.markdown('<div class="section">🏆 Preferred Strike Ranking</div>', unsafe_allow_html=True)
 
-# Build the ranking from the real NIFTY LTP and the nearest weekly expiry in Dhan's instrument master.
-ranking_offsets = sorted(set([-10, -8, -6, -4, -3, -2, -1, 0, 1, 2, 3, 4, 6, 8, 10]))
-ranking_sides = ["CE", "PE"] if set(sides) == {"CE", "PE"} else (sides or ["CE"])
-
-master = pd.DataFrame()
-exp_date = None
-contract_rows: list[dict] = []
-ltp_map: dict[str, float] = {}
-ranking_error = ""
-
-if live_nifty is not None and st.session_state.connected and st.session_state.dhan_token:
-    try:
-        master = fetch_instrument_master()
-        exp_date = nearest_weekly_expiry(master, date.today())
-        if exp_date is None:
-            raise RuntimeError("No nearest weekly NIFTY expiry found in the Dhan instrument master.")
-        strikes = [float(atm + offset * 50) for offset in ranking_offsets]
-        contracts = strike_contracts(master, exp_date, strikes, ranking_sides)
-        if contracts.empty:
-            raise RuntimeError(f"No option contracts found for expiry {exp_date} and requested strikes.")
-        ids = contracts["SECURITY_ID"].astype(str).tolist()
-        ltp_map = client.option_ltps(ids)
-        for r in contracts.itertuples(index=False):
-            contract_rows.append({
-                "security_id": str(r.SECURITY_ID),
-                "strike": float(r.STRIKE),
-                "option_type": str(r.OPTION_TYPE).upper(),
-                "expiry": r.EXPIRY,
-            })
-    except Exception as exc:
-        ranking_error = str(exc)
-
-if ranking_error:
-    st.warning(f"Strike ranking price lookup failed: {ranking_error}")
-
-rows = []
-for rank, offset in enumerate(ranking_offsets, 1):
-    for side in ranking_sides:
-        strike = (atm + offset * 50) if atm is not None else None
-        match = next((x for x in contract_rows if x["strike"] == float(strike) and x["option_type"] == side), None) if strike is not None else None
-        ltp = ltp_map.get(match["security_id"]) if match else None
-        rows.append({
-            "Rank": rank,
-            "Option": f"{strike:,.0f} {side}" if strike is not None else "—",
-            "Expiry": str(match["expiry"]) if match else (str(exp_date) if exp_date else "—"),
-            "Offset": f"{offset:+d}",
-            "LTP": f"₹{ltp:,.2f}" if ltp is not None else "Unavailable",
-            "Security ID": match["security_id"] if match else "—",
-            "Theta": "—",
-            "Vega": "—",
-            "Theta/Vega": "—",
-            "Sell Score": "Pending",
-        })
-
-st.dataframe(rows, use_container_width=True, hide_index=True, height=520)
-if st.session_state.connected and live_nifty is not None:
-    st.caption("Strike and expiry are resolved from the live NIFTY LTP and Dhan instrument master. LTP is fetched from Dhan F&O market quotes. A row marked Unavailable means Dhan did not return an LTP for that resolved security ID.")
+regime_name = result.regime.lower()
+if "bull" in regime_name:
+    preferred = [
+        (1, "PE SELL", -2, "Primary bullish premium sell"),
+        (2, "PE WING", -5, "Protective put wing"),
+        (3, "CE SELL", 4, "Farther OTM call sell / secondary"),
+    ]
+elif "bear" in regime_name:
+    preferred = [
+        (1, "CE SELL", 2, "Primary bearish premium sell"),
+        (2, "CE WING", 5, "Protective call wing"),
+        (3, "PE SELL", -4, "Farther OTM put sell / secondary"),
+    ]
 else:
-    st.caption("Connect to Dhan to populate live strike prices.")
+    preferred = [
+        (1, "CE SELL", 3, "Primary neutral call sell"),
+        (2, "PE SELL", -3, "Primary neutral put sell"),
+        (3, "CE WING", 6, "Protective call wing"),
+        (4, "PE WING", -6, "Protective put wing"),
+    ]
+
+ranking_rows = []
+for rank, role, offset, reason in preferred:
+    absolute = (atm + offset * 50) if atm is not None else None
+    ranking_rows.append({
+        "Rank": rank,
+        "Role": role,
+        "Relative Strike": f"ATM {offset:+d}",
+        "Strike": f"{absolute:,.0f}" if absolute is not None else "—",
+        "Distance": f"{abs(offset) * 50:,.0f} points from ATM" if atm is not None else "—",
+        "Reason": reason,
+    })
+
+st.dataframe(ranking_rows, use_container_width=True, hide_index=True, height=260)
+st.caption("Only NIFTY ATM and relative strike distance are used here. No option LTP is fetched or displayed.")
 
 ch1, ch2 = st.columns(2)
 with ch1:
@@ -213,7 +189,7 @@ with ch2:
     st.markdown('<div class="section">NIFTY / ATM Context</div>', unsafe_allow_html=True)
     if live_nifty is not None:
         series = [live_nifty - 40, live_nifty - 25, live_nifty - 12, live_nifty - 6, live_nifty - 2, live_nifty]
-        st.line_chart({"NIFTY LTP": series, "ATM": [round(x/50)*50 for x in series]})
+        st.line_chart({"NIFTY": series, "ATM": [round(x/50)*50 for x in series]})
     else:
         st.info("Live NIFTY context appears after Dhan connection.")
 
@@ -232,17 +208,15 @@ else:
 st.markdown("---")
 with st.expander("Research roadmap"):
     st.markdown("""
-**Phase 1:** Connect Dhan 1-minute historical/live option data.
+**Phase 1:** Basic regime-based strike selection.
 
-**Phase 2:** Calculate Greeks minute-by-minute for the actual strike of every contract.
+**Phase 2:** Calculate Greeks minute-by-minute for the selected contracts.
 
-**Phase 3:** Validate the regime engine and Theta/Vega thresholds on historical NIFTY data.
+**Phase 3:** Backtest ATM offsets and identify the best strike distance by regime.
 
-**Phase 4:** Rank strikes and select Iron Condor / Bull Put / Bear Call / other structures by regime.
+**Phase 4:** Add Theta/Vega and IV gating without changing the basic strike-selector layer.
 
-**Phase 5:** Run a paper portfolio continuously and record entry, adjustment, exit, P&L and drawdown.
-
-**Phase 6:** Backtest out-of-sample before considering any live execution layer.
+**Phase 5:** Run a paper portfolio and record entry, adjustment, exit, P&L and drawdown.
 """)
 
 st.caption(f"Mode: {'Live' if st.session_state.live_mode else 'Historical'} • Date: {hist_date:%d-%b-%Y} • Requested universe: ATM−{strike_range}…ATM+{strike_range} • {timeframe} • {expiry_mode}")
