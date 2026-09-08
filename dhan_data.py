@@ -51,7 +51,6 @@ class DhanClient:
         raise last or RuntimeError("Dhan request failed")
 
     def nifty_ltp(self) -> float:
-        """Get the current NIFTY 50 index LTP from Dhan market feed."""
         body = self.post("/marketfeed/ltp", {"IDX_I": [int(NIFTY_ID)]}, retries=2)
         data = body.get("data") or {}
         idx = data.get("IDX_I") or {}
@@ -61,6 +60,20 @@ class DhanClient:
         if value is None:
             raise RuntimeError("Dhan did not return NIFTY LTP")
         return float(value)
+
+    def option_ltps(self, security_ids: list[str]) -> dict[str, float]:
+        """Return current LTP for NSE F&O security IDs in one batched request."""
+        ids = [str(x) for x in security_ids if str(x).strip()]
+        if not ids:
+            return {}
+        body = self.post("/marketfeed/ltp", {"NSE_FNO": [int(x) for x in ids]}, retries=2)
+        block = (body.get("data") or {}).get("NSE_FNO") or {}
+        out: dict[str, float] = {}
+        for sid in ids:
+            item = block.get(sid)
+            if isinstance(item, dict) and item.get("last_price") is not None:
+                out[sid] = float(item["last_price"])
+        return out
 
 
 def fetch_instrument_master() -> pd.DataFrame:
@@ -97,10 +110,25 @@ def available_expiries(master: pd.DataFrame, start: date, end: date) -> list[dat
     return sorted(x for x in q["EXPIRY"].dropna().unique().tolist() if start <= x <= end)
 
 
+def nearest_weekly_expiry(master: pd.DataFrame, on_date: date) -> date | None:
+    values = available_expiries(master, on_date, date.max)
+    return values[0] if values else None
+
+
 def expiry_for_session(ts: pd.Timestamp, expiries: list[date]) -> date | None:
     d = ts.date()
     future = [exp for exp in expiries if exp >= d]
     return min(future) if future else None
+
+
+def strike_contracts(master: pd.DataFrame, expiry: date, strikes: list[float], sides: list[str]) -> pd.DataFrame:
+    q = master[
+        (master["UNDERLYING_SECURITY_ID"] == NIFTY_ID)
+        & master["EXPIRY"].eq(expiry)
+        & master["OPTION_TYPE"].isin(sides)
+        & master["STRIKE"].isin(strikes)
+    ].copy()
+    return q[["SECURITY_ID", "EXPIRY", "STRIKE", "OPTION_TYPE"]].drop_duplicates()
 
 
 def rolling_call(client: DhanClient, start: date, end_exclusive: date, offset: int, side: str) -> pd.DataFrame:
