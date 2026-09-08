@@ -21,36 +21,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 CLIENT_ID = "1113195747"
-for key, default in {"dhan_token": "", "connected": False, "live_mode": False, "live_nifty": None, "live_error": ""}.items():
-    if key not in st.session_state:
-        st.session_state[key] = default
 
 with st.sidebar:
-    st.header("🔐 Dhan Login")
-    st.caption("Client ID is fixed to 1113195747. Access Token stays only in this Streamlit session.")
-    st.text_input("Dhan Client ID", value=CLIENT_ID, disabled=True)
-    tok = st.text_input("Dhan Access Token", value=st.session_state.dhan_token, type="password")
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Connect", type="primary", use_container_width=True):
-            st.session_state.dhan_token = tok.strip()
-            st.session_state.connected = bool(st.session_state.dhan_token)
-            st.session_state.live_nifty = None
-            st.session_state.live_error = ""
-    with c2:
-        if st.button("Clear", use_container_width=True):
-            st.session_state.dhan_token = ""
-            st.session_state.connected = False
-            st.session_state.live_nifty = None
-            st.session_state.live_error = ""
-            st.rerun()
-    st.success("Dhan session ready") if st.session_state.connected else st.info("Disconnected")
-
-    st.divider()
     st.header("Engine Controls")
-    mode = st.radio("Data mode", ["Historical", "Live"], horizontal=True)
-    st.session_state.live_mode = mode == "Live"
-    hist_date = st.date_input("Research date", value=date.today()) if not st.session_state.live_mode else date.today()
+    atm_input = st.number_input("NIFTY Spot", min_value=1000.0, max_value=100000.0, value=23690.0, step=50.0, help="Enter the current NIFTY spot. No Dhan quote is used here.")
+    atm = round(atm_input / 50) * 50
     expiry_mode = st.selectbox("Expiry", ["Nearest weekly", "Next weekly", "Select later"])
     strike_range = st.slider("Strike universe", 1, 20, 20)
     sides = st.multiselect("Option sides", ["CE", "PE"], default=["CE", "PE"])
@@ -65,46 +40,18 @@ with st.sidebar:
 st.markdown("""
 <div class="hero">
   <h1 style="margin-bottom:4px;">📈 NIFTY Intraday Option Selling Engine</h1>
-  <div class="small">Theta + Vega + IV + market regime • basic preferred-strike prototype</div>
+  <div class="small">Basic regime-based preferred-strike selector • no option LTP dependency</div>
 </div>
 """, unsafe_allow_html=True)
-
-live_nifty = None
-live_error = ""
-if st.session_state.connected and st.session_state.dhan_token:
-    try:
-        client = DhanClient(CLIENT_ID, st.session_state.dhan_token)
-        live_nifty = client.nifty_ltp()
-        st.session_state.live_nifty = live_nifty
-        st.session_state.live_error = ""
-    except Exception as exc:
-        live_error = str(exc)
-        st.session_state.live_error = live_error
-else:
-    live_nifty = st.session_state.live_nifty
-    live_error = st.session_state.live_error
-
-atm = round(live_nifty / 50) * 50 if live_nifty is not None else None
 
 proto = MarketInputs(trend_score=0.05, realized_vol_percentile=38, iv_percentile=72, iv_change=-0.35, theta_vega=0.34)
 result = classify(proto)
 
-c0, c1, c2, c3, c4, c5 = st.columns(6)
-if live_nifty is not None:
-    c0.metric("NIFTY", f"₹{live_nifty:,.2f}", "Live from Dhan")
-    c1.metric("ATM", f"{atm:,.0f}")
-else:
-    c0.metric("NIFTY", "—", "Not connected")
-    c1.metric("ATM", "—")
+c0, c1, c2, c3 = st.columns(4)
+c0.metric("NIFTY Spot", f"₹{atm:,.0f}", "Manual input")
+c1.metric("ATM", f"{atm:,.0f}")
 c2.metric("Expiry", expiry_mode)
-c3.metric("Quote status", "Live" if live_nifty is not None else "Waiting")
-c4.metric("Data", "1 min")
-c5.metric("Refresh", "On demand")
-
-if live_error:
-    st.error(f"Dhan NIFTY quote error: {live_error}")
-elif not st.session_state.connected:
-    st.info("Connect to Dhan in the left panel to populate the real NIFTY level and preferred absolute strikes.")
+c3.metric("Mode", "Basic selector")
 
 left, right = st.columns([1.55, 1])
 with left:
@@ -132,12 +79,12 @@ with right:
     else:
         st.error("AVOID NEW PREMIUM SELLING")
     st.write(f"**Preferred structure:** {result.preferred_strategy}")
-    st.write("**Strike selection:** dynamic around the current ATM")
+    st.write("**Strike selection:** relative to manually entered NIFTY ATM")
     st.write("**Wings:** determined later by tested risk rules")
     st.divider()
     st.metric("Selling Score", f"{result.selling_score}/100")
     st.metric("Theta/Vega", f"{proto.theta_vega:.2f}x")
-    st.caption("Option LTP is not used or displayed in Strike Ranking.")
+    st.caption("No option LTP is fetched or displayed.")
     st.markdown("**Why this decision?**")
     for reason in result.reasons:
         st.write(f"• {reason}")
@@ -168,30 +115,27 @@ else:
 
 ranking_rows = []
 for rank, role, offset, reason in preferred:
-    absolute = (atm + offset * 50) if atm is not None else None
+    absolute = atm + offset * 50
     ranking_rows.append({
         "Rank": rank,
         "Role": role,
         "Relative Strike": f"ATM {offset:+d}",
-        "Strike": f"{absolute:,.0f}" if absolute is not None else "—",
-        "Distance": f"{abs(offset) * 50:,.0f} points from ATM" if atm is not None else "—",
+        "Strike": f"{absolute:,.0f}",
+        "Distance": f"{abs(offset) * 50:,.0f} points from ATM",
         "Reason": reason,
     })
 
 st.dataframe(ranking_rows, use_container_width=True, hide_index=True, height=260)
-st.caption("Only NIFTY ATM and relative strike distance are used here. No option LTP is fetched or displayed.")
+st.caption("Strike Ranking uses only NIFTY Spot/ATM and the relative strike rule. No Dhan quote, option LTP, security ID, or instrument-master lookup is involved.")
 
 ch1, ch2 = st.columns(2)
 with ch1:
     st.markdown('<div class="section">Theta / Vega Trend</div>', unsafe_allow_html=True)
-    st.line_chart({"Theta/Vega": [2.1,2.3,2.6,2.8,3.1,3.0,3.2,3.4]})
+    st.line_chart({"Theta/Vega": [2.1, 2.3, 2.6, 2.8, 3.1, 3.0, 3.2, 3.4]})
 with ch2:
     st.markdown('<div class="section">NIFTY / ATM Context</div>', unsafe_allow_html=True)
-    if live_nifty is not None:
-        series = [live_nifty - 40, live_nifty - 25, live_nifty - 12, live_nifty - 6, live_nifty - 2, live_nifty]
-        st.line_chart({"NIFTY": series, "ATM": [round(x/50)*50 for x in series]})
-    else:
-        st.info("Live NIFTY context appears after Dhan connection.")
+    series = [atm - 40, atm - 25, atm - 12, atm - 6, atm - 2, atm]
+    st.line_chart({"NIFTY": series, "ATM": [round(x / 50) * 50 for x in series]})
 
 st.markdown("---")
 st.markdown('<div class="section">🛡 Sample Portfolio</div>', unsafe_allow_html=True)
@@ -200,7 +144,7 @@ if position_enabled and position_type != "None":
     p1.metric("Structure", position_type)
     p2.metric("Quantity", str(quantity))
     p3.metric("Paper MTM", "—")
-    p4.metric("Risk", "Awaiting live Greeks")
+    p4.metric("Risk", "Awaiting later Greek layer")
     st.info("This is a paper/research position monitor. It does not place orders with Dhan.")
 else:
     st.info("Enable the paper position monitor from the left panel to track a sample strategy.")
@@ -210,13 +154,11 @@ with st.expander("Research roadmap"):
     st.markdown("""
 **Phase 1:** Basic regime-based strike selection.
 
-**Phase 2:** Calculate Greeks minute-by-minute for the selected contracts.
+**Phase 2:** Backtest ATM offsets and identify the best strike distance by regime.
 
-**Phase 3:** Backtest ATM offsets and identify the best strike distance by regime.
+**Phase 3:** Add Theta/Vega and IV gating without changing the strike-selector layer.
 
-**Phase 4:** Add Theta/Vega and IV gating without changing the basic strike-selector layer.
-
-**Phase 5:** Run a paper portfolio and record entry, adjustment, exit, P&L and drawdown.
+**Phase 4:** Run a paper portfolio and record entry, adjustment, exit, P&L and drawdown.
 """)
 
-st.caption(f"Mode: {'Live' if st.session_state.live_mode else 'Historical'} • Date: {hist_date:%d-%b-%Y} • Requested universe: ATM−{strike_range}…ATM+{strike_range} • {timeframe} • {expiry_mode}")
+st.caption(f"Mode: Basic selector • Date: {date.today():%d-%b-%Y} • Requested universe: ATM−{strike_range}…ATM+{strike_range} • {timeframe} • {expiry_mode}")
