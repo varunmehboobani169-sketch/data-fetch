@@ -15,6 +15,12 @@ IST = "Asia/Kolkata"
 DATA_DIR = Path("data")
 
 
+def _normalise_security_id(series: pd.Series) -> pd.Series:
+    """Normalize Dhan security IDs so CSV numeric values such as 13.0 become '13'."""
+    numeric = pd.to_numeric(series, errors="coerce")
+    return numeric.map(lambda x: str(int(x)) if pd.notna(x) and float(x).is_integer() else str(x).strip())
+
+
 class DhanClient:
     def __init__(self, client_id: str, access_token: str):
         if not client_id.strip() or not access_token.strip():
@@ -90,6 +96,8 @@ def fetch_instrument_master() -> pd.DataFrame:
         "SECURITY_ID": "SECURITY_ID",
         "SEM_SECURITY_ID": "SECURITY_ID",
         "UNDERLYING_SECURITY_ID": "UNDERLYING_SECURITY_ID",
+        "SEM_UNDERLYING_SECURITY_ID": "UNDERLYING_SECURITY_ID",
+        "SM_UNDERLYING_SECURITY_ID": "UNDERLYING_SECURITY_ID",
         "SEM_EXPIRY_DATE": "EXPIRY",
         "SM_EXPIRY_DATE": "EXPIRY",
         "EXPIRY_DATE": "EXPIRY",
@@ -105,20 +113,13 @@ def fetch_instrument_master() -> pd.DataFrame:
     rename = {col: aliases[str(col).upper().strip()] for col in df.columns if str(col).upper().strip() in aliases}
     df = df.rename(columns=rename)
 
-    # Some Dhan master revisions use only a symbolic underlying column.
-    if "UNDERLYING_SECURITY_ID" not in df.columns:
-        for candidate in ("SEM_UNDERLYING_SECURITY_ID", "SM_UNDERLYING_SECURITY_ID"):
-            if candidate in df.columns:
-                df = df.rename(columns={candidate: "UNDERLYING_SECURITY_ID"})
-                break
-
     required = {"SECURITY_ID", "UNDERLYING_SECURITY_ID", "EXPIRY", "STRIKE", "OPTION_TYPE"}
     missing = required - set(df.columns)
     if missing:
         raise RuntimeError(f"Instrument master is missing: {sorted(missing)}")
 
-    df["SECURITY_ID"] = df["SECURITY_ID"].astype(str).str.strip()
-    df["UNDERLYING_SECURITY_ID"] = df["UNDERLYING_SECURITY_ID"].astype(str).str.strip()
+    df["SECURITY_ID"] = _normalise_security_id(df["SECURITY_ID"])
+    df["UNDERLYING_SECURITY_ID"] = _normalise_security_id(df["UNDERLYING_SECURITY_ID"])
     df["EXPIRY"] = pd.to_datetime(df["EXPIRY"], errors="coerce").dt.date
     df["STRIKE"] = pd.to_numeric(df["STRIKE"], errors="coerce")
     df["OPTION_TYPE"] = df["OPTION_TYPE"].astype(str).str.upper().str.strip()
@@ -142,17 +143,15 @@ def _nifty_option_rows(master: pd.DataFrame) -> pd.DataFrame:
 def available_expiries(master: pd.DataFrame, start: date, end: date) -> list[date]:
     q = _nifty_option_rows(master)
     # Dhan's master has changed the exact spelling/value used for the expiry flag
-    # across revisions. The nearest future NIFTY option expiry is the weekly cycle
-    # for the live dashboard, so do not make the dashboard depend on EXPIRY_FLAG == "W".
+    # across revisions. For the live dashboard, the nearest future NIFTY option
+    # expiry is the relevant weekly cycle, so do not depend on EXPIRY_FLAG == "W".
     values = [x for x in q["EXPIRY"].dropna().unique().tolist() if start <= x <= end]
     return sorted(values)
 
 
 def nearest_weekly_expiry(master: pd.DataFrame, on_date: date) -> date | None:
     values = available_expiries(master, on_date, date.max)
-    if not values:
-        return None
-    return values[0]
+    return values[0] if values else None
 
 
 def expiry_for_session(ts: pd.Timestamp, expiries: list[date]) -> date | None:
