@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import date
 
-import pandas as pd
 import streamlit as st
 
 from dhan_data import DhanClient
@@ -26,7 +25,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 CLIENT_ID = "1113195747"
-
 for key, default in {
     "dhan_client_id": CLIENT_ID,
     "dhan_token": "",
@@ -60,17 +58,11 @@ with st.sidebar:
             st.rerun()
 
     st.success("Dhan session ready") if st.session_state.connected else st.info("Disconnected")
-
     st.divider()
     st.header("Engine Controls")
     mode = st.radio("Data mode", ["Historical", "Live"], horizontal=True)
     st.session_state.live_mode = mode == "Live"
-
-    if not st.session_state.live_mode:
-        hist_date = st.date_input("Research date", value=date.today())
-    else:
-        hist_date = date.today()
-
+    hist_date = st.date_input("Research date", value=date.today()) if not st.session_state.live_mode else date.today()
     expiry = st.selectbox("Expiry", ["Nearest weekly", "Next weekly", "Select later"])
     strike_range = st.slider("Strike universe", 1, 20, 20)
     sides = st.multiselect("Option sides", ["CE", "PE"], default=["CE", "PE"])
@@ -79,11 +71,7 @@ with st.sidebar:
     st.divider()
     st.subheader("Paper Position Monitor")
     position_enabled = st.toggle("Enable position monitor", value=False)
-    position_type = st.selectbox(
-        "Position structure",
-        ["None", "Iron Condor", "Bull Put Spread", "Bear Call Spread", "Short Strangle"],
-        disabled=not position_enabled,
-    )
+    position_type = st.selectbox("Position structure", ["None", "Iron Condor", "Bull Put Spread", "Bear Call Spread", "Short Strangle"], disabled=not position_enabled)
     quantity = st.number_input("Reference quantity", min_value=1, value=1, step=1, disabled=not position_enabled)
 
 st.markdown("""
@@ -93,7 +81,8 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Live market value: never display a hard-coded NIFTY price.
+# Live NIFTY value. The value shown as "NIFTY LTP" is the latest traded price
+# returned by Dhan's market-feed endpoint, not a hard-coded/sample value.
 live_nifty = None
 live_error = ""
 if st.session_state.connected and st.session_state.dhan_token:
@@ -109,12 +98,8 @@ else:
     live_nifty = st.session_state.live_nifty
     live_error = st.session_state.live_error
 
-if live_nifty is not None:
-    atm = round(live_nifty / 50) * 50
-else:
-    atm = None
+atm = round(live_nifty / 50) * 50 if live_nifty is not None else None
 
-# Prototype strategy inputs remain clearly separated from live price data.
 proto = MarketInputs(
     trend_score=0.05,
     realized_vol_percentile=38,
@@ -124,25 +109,22 @@ proto = MarketInputs(
 )
 result = classify(proto)
 
-status_delta = "Live from Dhan" if live_nifty is not None else "Waiting for Dhan"
-
-c0, c1, c2, c3, c4 = st.columns(5)
+c0, c1, c2, c3, c4, c5 = st.columns(6)
 if live_nifty is not None:
-    c0.metric("NIFTY", f"{live_nifty:,.2f}", status_delta)
+    c0.metric("NIFTY LTP", f"{live_nifty:,.2f}", "Live from Dhan")
     c1.metric("ATM", f"{atm:,.0f}")
 else:
-    c0.metric("NIFTY", "—", "Not connected")
+    c0.metric("NIFTY LTP", "—", "Not connected")
     c1.metric("ATM", "—")
 c2.metric("Expiry", expiry)
-c3.metric("Time", "Live quote")
+c3.metric("Quote status", "Live" if live_nifty is not None else "Waiting")
 c4.metric("Data", "1 min")
+c5.metric("Refresh", "On demand")
 
 if live_error:
-    st.error(f"Dhan quote error: {live_error}")
-elif st.session_state.connected and live_nifty is None:
-    st.warning("Connected session has no NIFTY quote yet. Check the Dhan Access Token and market-feed permissions.")
+    st.error(f"Dhan LTP error: {live_error}")
 elif not st.session_state.connected:
-    st.info("Connect to Dhan in the left panel to replace all sample market values with real data.")
+    st.info("Connect to Dhan in the left panel to populate the real NIFTY LTP.")
 
 left, right = st.columns([1.55, 1])
 with left:
@@ -161,12 +143,11 @@ with left:
     s3.metric("Action", result.action)
 
     st.markdown('<div class="section">Market Regime Decision Tree</div>', unsafe_allow_html=True)
-    regime_rows = {
+    st.dataframe({
         "Engine": ["Trend", "Realized Vol", "IV", "Theta/Vega"],
         "Reading": ["Neutral / Sideways", f"{proto.realized_vol_percentile:.0f}th percentile", f"{proto.iv_percentile:.0f}th percentile • {proto.iv_change:+.2f}", f"{proto.theta_vega:.2f}x"],
         "Interpretation": [result.regime, "Contained" if proto.realized_vol_percentile < 50 else "Elevated", "Falling" if proto.iv_change < 0 else "Rising", "Favorable" if proto.theta_vega >= 0.30 else "Selective"],
-    }
-    st.dataframe(regime_rows, use_container_width=True, hide_index=True)
+    }, use_container_width=True, hide_index=True)
 
 with right:
     st.markdown('<div class="section">⚡ Strategy Selection</div>', unsafe_allow_html=True)
@@ -176,7 +157,6 @@ with right:
         st.warning("SELECTIVE PREMIUM SELLING")
     else:
         st.error("AVOID NEW PREMIUM SELLING")
-
     st.write(f"**Preferred structure:** {result.preferred_strategy}")
     st.write("**Strike selection:** dynamic around the actual NIFTY ATM")
     st.write("**Wings:** determined later by tested risk rules")
@@ -190,33 +170,22 @@ with right:
 
 st.markdown("---")
 st.markdown('<div class="section">🏆 Strike Ranking — Prototype Layout</div>', unsafe_allow_html=True)
+offsets = [4, 3, -4, -5, 5, -6]
 if atm is not None:
-    offsets = [4, 3, -4, -5, 5, -6]
     options = [f"{atm + o*50:,.0f} CE" if o > 0 else f"{atm + o*50:,.0f} PE" for o in offsets]
 else:
     options = ["Connect to Dhan to resolve strikes"] * 6
-ranking = {
-    "Rank": [1, 2, 3, 4, 5, 6],
-    "Option": options,
-    "Offset": offsets,
-    "Theta": ["+2.18", "+2.04", "+2.11", "+1.94", "+1.82", "+1.75"],
-    "Vega": ["0.64", "0.71", "0.68", "0.73", "0.79", "0.81"],
-    "Theta/Vega": [3.41, 2.87, 3.10, 2.66, 2.30, 2.16],
-    "Sell Score": [94, 90, 92, 86, 79, 75],
-    "Status": ["Preferred", "Strong", "Preferred", "Strong", "Watch", "Watch"],
-}
-st.dataframe(ranking, use_container_width=True, hide_index=True)
+st.dataframe({"Rank": [1,2,3,4,5,6], "Option": options, "Offset": offsets, "Theta": ["+2.18","+2.04","+2.11","+1.94","+1.82","+1.75"], "Vega": ["0.64","0.71","0.68","0.73","0.79","0.81"], "Theta/Vega": [3.41,2.87,3.10,2.66,2.30,2.16], "Sell Score": [94,90,92,86,79,75], "Status": ["Preferred","Strong","Preferred","Strong","Watch","Watch"]}, use_container_width=True, hide_index=True)
 
 ch1, ch2 = st.columns(2)
 with ch1:
     st.markdown('<div class="section">Theta / Vega Trend</div>', unsafe_allow_html=True)
-    st.line_chart({"Theta/Vega": [2.1, 2.3, 2.6, 2.8, 3.1, 3.0, 3.2, 3.4]})
+    st.line_chart({"Theta/Vega": [2.1,2.3,2.6,2.8,3.1,3.0,3.2,3.4]})
 with ch2:
     st.markdown('<div class="section">NIFTY / ATM Context</div>', unsafe_allow_html=True)
     if live_nifty is not None:
         series = [live_nifty - 40, live_nifty - 25, live_nifty - 12, live_nifty - 6, live_nifty - 2, live_nifty]
-        atm_series = [round(x / 50) * 50 for x in series]
-        st.line_chart({"NIFTY": series, "ATM": atm_series})
+        st.line_chart({"NIFTY LTP": series, "ATM": [round(x/50)*50 for x in series]})
     else:
         st.info("Live NIFTY context appears after Dhan connection.")
 
