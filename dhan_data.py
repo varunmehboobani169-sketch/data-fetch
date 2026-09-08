@@ -10,7 +10,7 @@ import requests
 
 API = "https://api.dhan.co/v2"
 MASTER_URL = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
-NIFTY_ID = 13
+NIFTY_ID = "13"
 IST = "Asia/Kolkata"
 DATA_DIR = Path("data")
 
@@ -19,12 +19,13 @@ class DhanClient:
     def __init__(self, client_id: str, access_token: str):
         if not client_id.strip() or not access_token.strip():
             raise ValueError("Dhan Client ID and Access Token are required.")
+        self.client_id = client_id.strip()
         self.session = requests.Session()
         self.session.headers.update({
             "Accept": "application/json",
             "Content-Type": "application/json",
             "access-token": access_token.strip(),
-            "client-id": client_id.strip(),
+            "client-id": self.client_id,
         })
 
     def post(self, path: str, payload: dict, retries: int = 4) -> dict:
@@ -49,6 +50,18 @@ class DhanClient:
                     time.sleep(min(2 ** attempt, 10))
         raise last or RuntimeError("Dhan request failed")
 
+    def nifty_ltp(self) -> float:
+        """Get the current NIFTY 50 index LTP from Dhan market feed."""
+        body = self.post("/marketfeed/ltp", {"IDX_I": [int(NIFTY_ID)]}, retries=2)
+        data = body.get("data") or {}
+        idx = data.get("IDX_I") or {}
+        value = idx.get(NIFTY_ID)
+        if isinstance(value, dict):
+            value = value.get("last_price")
+        if value is None:
+            raise RuntimeError("Dhan did not return NIFTY LTP")
+        return float(value)
+
 
 def fetch_instrument_master() -> pd.DataFrame:
     df = pd.read_csv(MASTER_URL, low_memory=False)
@@ -64,11 +77,7 @@ def fetch_instrument_master() -> pd.DataFrame:
         "OPTION_TYPE": "OPTION_TYPE",
         "SEM_OPTION_TYPE": "OPTION_TYPE",
     }
-    rename = {
-        col: aliases[str(col).upper().strip()]
-        for col in df.columns
-        if str(col).upper().strip() in aliases
-    }
+    rename = {col: aliases[str(col).upper().strip()] for col in df.columns if str(col).upper().strip() in aliases}
     df = df.rename(columns=rename)
     required = {"SECURITY_ID", "UNDERLYING_SECURITY_ID", "EXPIRY", "STRIKE", "OPTION_TYPE", "EXPIRY_FLAG"}
     missing = required - set(df.columns)
@@ -84,12 +93,7 @@ def fetch_instrument_master() -> pd.DataFrame:
 
 
 def available_expiries(master: pd.DataFrame, start: date, end: date) -> list[date]:
-    q = master[
-        (master["UNDERLYING_SECURITY_ID"] == str(NIFTY_ID))
-        & master["OPTION_TYPE"].isin(["CE", "PE"])
-        & master["EXPIRY_FLAG"].eq("W")
-        & master["EXPIRY"].notna()
-    ]
+    q = master[(master["UNDERLYING_SECURITY_ID"] == NIFTY_ID) & master["OPTION_TYPE"].isin(["CE", "PE"]) & master["EXPIRY_FLAG"].eq("W") & master["EXPIRY"].notna()]
     return sorted(x for x in q["EXPIRY"].dropna().unique().tolist() if start <= x <= end)
 
 
@@ -121,27 +125,11 @@ def rolling_call(client: DhanClient, start: date, end_exclusive: date, offset: i
     if not ts:
         return pd.DataFrame()
     n = len(ts)
-
     def arr(key: str):
         values = block.get(key)
         return values if isinstance(values, list) else [None] * n
-
-    timestamp = pd.to_datetime(ts, unit="s", utc=True).tz_convert(IST)
-    return pd.DataFrame({
-        "timestamp": timestamp,
-        "open": arr("open"),
-        "high": arr("high"),
-        "low": arr("low"),
-        "close": arr("close"),
-        "volume": arr("volume"),
-        "oi": arr("oi"),
-        "iv": arr("iv"),
-        "spot": arr("spot"),
-        "strike": arr("strike"),
-        "option_type": side,
-        "strike_offset": offset,
-        "moneyness": "ATM" if offset == 0 else f"ATM{offset:+d}",
-    })
+    timestamp = pd.to_datetime(ts, unit="s", utc=True).dt.tz_convert(IST)
+    return pd.DataFrame({"timestamp": timestamp, "open": arr("open"), "high": arr("high"), "low": arr("low"), "close": arr("close"), "volume": arr("volume"), "oi": arr("oi"), "iv": arr("iv"), "spot": arr("spot"), "strike": arr("strike"), "option_type": side, "strike_offset": offset, "moneyness": "ATM" if offset == 0 else f"ATM{offset:+d}"})
 
 
 def chunks(start: date, end_exclusive: date, days: int = 30):
@@ -164,33 +152,19 @@ class HistoricalCollector:
         self.data_dir = data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-    def fetch_range(
-        self,
-        start: date,
-        end: date,
-        strike_range: int,
-        sides: list[str],
-        progress: Callable[[int, int, str], None] | None = None,
-    ) -> FetchResult:
+    def fetch_range(self, start: date, end: date, strike_range: int, sides: list[str], progress: Callable[[int, int, str], None] | None = None) -> FetchResult:
         requested = min(max(strike_range, 1), 20)
         native = min(requested, 10)
         windows = list(chunks(start, end + timedelta(days=1), 30))
-        jobs = [
-            (a, b, offset, side)
-            for a, b in windows
-            for side in sides
-            for offset in range(-native, native + 1)
-        ]
+        jobs = [(a, b, offset, side) for a, b in windows for side in sides for offset in range(-native, native + 1)]
         total = len(jobs)
         done = 0
         errors: list[str] = []
         output_files: list[Path] = []
         master = fetch_instrument_master()
         expiries = available_expiries(master, start, end)
-
         for a, b, offset, side in jobs:
-            cache_key = f"{a:%Y%m%d}_{b:%Y%m%d}_{side}_{offset:+d}.parquet"
-            path = self.data_dir / cache_key
+            path = self.data_dir / f"{a:%Y%m%d}_{b:%Y%m%d}_{side}_{offset:+d}.parquet"
             try:
                 if path.exists() and path.stat().st_size > 0:
                     frame = pd.read_parquet(path)
@@ -205,12 +179,7 @@ class HistoricalCollector:
                 errors.append(f"{a}→{b} {side} ATM{offset:+d}: {exc}")
             done += 1
             if progress:
-                progress(
-                    done,
-                    total,
-                    f"Fetching {side} ATM{offset:+d} • {a:%d-%b-%Y} → {b:%d-%b-%Y} • {done}/{total}",
-                )
-
+                progress(done, total, f"Fetching {side} ATM{offset:+d} • {a:%d-%b-%Y} → {b:%d-%b-%Y} • {done}/{total}")
         frames = []
         for path in output_files:
             try:
@@ -221,9 +190,5 @@ class HistoricalCollector:
             return FetchResult(pd.DataFrame(), errors)
         df = pd.concat(frames, ignore_index=True)
         df = df[(df["timestamp"].dt.date >= start) & (df["timestamp"].dt.date <= end)]
-        df = (
-            df.drop_duplicates(["timestamp", "option_type", "strike_offset"])
-            .sort_values(["timestamp", "option_type", "strike_offset"])
-            .reset_index(drop=True)
-        )
+        df = df.drop_duplicates(["timestamp", "option_type", "strike_offset"]).sort_values(["timestamp", "option_type", "strike_offset"]).reset_index(drop=True)
         return FetchResult(df, errors)
