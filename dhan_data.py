@@ -90,37 +90,69 @@ def fetch_instrument_master() -> pd.DataFrame:
         "SECURITY_ID": "SECURITY_ID",
         "SEM_SECURITY_ID": "SECURITY_ID",
         "UNDERLYING_SECURITY_ID": "UNDERLYING_SECURITY_ID",
-        "SM_EXPIRY_DATE": "EXPIRY",
         "SEM_EXPIRY_DATE": "EXPIRY",
+        "SM_EXPIRY_DATE": "EXPIRY",
+        "EXPIRY_DATE": "EXPIRY",
         "SEM_EXPIRY_FLAG": "EXPIRY_FLAG",
+        "EXPIRY_FLAG": "EXPIRY_FLAG",
+        "SM_EXPIRY_FLAG": "EXPIRY_FLAG",
         "STRIKE_PRICE": "STRIKE",
         "SEM_STRIKE_PRICE": "STRIKE",
         "OPTION_TYPE": "OPTION_TYPE",
         "SEM_OPTION_TYPE": "OPTION_TYPE",
+        "SEM_OPTION_TYPE_NAME": "OPTION_TYPE",
     }
     rename = {col: aliases[str(col).upper().strip()] for col in df.columns if str(col).upper().strip() in aliases}
     df = df.rename(columns=rename)
-    required = {"SECURITY_ID", "UNDERLYING_SECURITY_ID", "EXPIRY", "STRIKE", "OPTION_TYPE", "EXPIRY_FLAG"}
+
+    # Some Dhan master revisions use only a symbolic underlying column.
+    if "UNDERLYING_SECURITY_ID" not in df.columns:
+        for candidate in ("SEM_UNDERLYING_SECURITY_ID", "SM_UNDERLYING_SECURITY_ID"):
+            if candidate in df.columns:
+                df = df.rename(columns={candidate: "UNDERLYING_SECURITY_ID"})
+                break
+
+    required = {"SECURITY_ID", "UNDERLYING_SECURITY_ID", "EXPIRY", "STRIKE", "OPTION_TYPE"}
     missing = required - set(df.columns)
     if missing:
         raise RuntimeError(f"Instrument master is missing: {sorted(missing)}")
-    df["SECURITY_ID"] = df["SECURITY_ID"].astype(str)
-    df["UNDERLYING_SECURITY_ID"] = df["UNDERLYING_SECURITY_ID"].astype(str)
+
+    df["SECURITY_ID"] = df["SECURITY_ID"].astype(str).str.strip()
+    df["UNDERLYING_SECURITY_ID"] = df["UNDERLYING_SECURITY_ID"].astype(str).str.strip()
     df["EXPIRY"] = pd.to_datetime(df["EXPIRY"], errors="coerce").dt.date
     df["STRIKE"] = pd.to_numeric(df["STRIKE"], errors="coerce")
-    df["OPTION_TYPE"] = df["OPTION_TYPE"].astype(str).str.upper()
-    df["EXPIRY_FLAG"] = df["EXPIRY_FLAG"].astype(str).str.upper()
+    df["OPTION_TYPE"] = df["OPTION_TYPE"].astype(str).str.upper().str.strip()
+    if "EXPIRY_FLAG" in df.columns:
+        df["EXPIRY_FLAG"] = df["EXPIRY_FLAG"].astype(str).str.upper().str.strip()
+    else:
+        df["EXPIRY_FLAG"] = ""
     return df
 
 
+def _nifty_option_rows(master: pd.DataFrame) -> pd.DataFrame:
+    q = master[
+        master["UNDERLYING_SECURITY_ID"].eq(NIFTY_ID)
+        & master["OPTION_TYPE"].isin(["CE", "PE"])
+        & master["EXPIRY"].notna()
+        & master["STRIKE"].notna()
+    ].copy()
+    return q
+
+
 def available_expiries(master: pd.DataFrame, start: date, end: date) -> list[date]:
-    q = master[(master["UNDERLYING_SECURITY_ID"] == NIFTY_ID) & master["OPTION_TYPE"].isin(["CE", "PE"]) & master["EXPIRY_FLAG"].eq("W") & master["EXPIRY"].notna()]
-    return sorted(x for x in q["EXPIRY"].dropna().unique().tolist() if start <= x <= end)
+    q = _nifty_option_rows(master)
+    # Dhan's master has changed the exact spelling/value used for the expiry flag
+    # across revisions. The nearest future NIFTY option expiry is the weekly cycle
+    # for the live dashboard, so do not make the dashboard depend on EXPIRY_FLAG == "W".
+    values = [x for x in q["EXPIRY"].dropna().unique().tolist() if start <= x <= end]
+    return sorted(values)
 
 
 def nearest_weekly_expiry(master: pd.DataFrame, on_date: date) -> date | None:
     values = available_expiries(master, on_date, date.max)
-    return values[0] if values else None
+    if not values:
+        return None
+    return values[0]
 
 
 def expiry_for_session(ts: pd.Timestamp, expiries: list[date]) -> date | None:
@@ -130,7 +162,12 @@ def expiry_for_session(ts: pd.Timestamp, expiries: list[date]) -> date | None:
 
 
 def strike_contracts(master: pd.DataFrame, expiry: date, strikes: list[float], sides: list[str]) -> pd.DataFrame:
-    q = master[(master["UNDERLYING_SECURITY_ID"] == NIFTY_ID) & master["EXPIRY"].eq(expiry) & master["OPTION_TYPE"].isin(sides) & master["STRIKE"].isin(strikes)].copy()
+    q = master[
+        master["UNDERLYING_SECURITY_ID"].eq(NIFTY_ID)
+        & master["EXPIRY"].eq(expiry)
+        & master["OPTION_TYPE"].isin(sides)
+        & master["STRIKE"].isin(strikes)
+    ].copy()
     return q[["SECURITY_ID", "EXPIRY", "STRIKE", "OPTION_TYPE"]].drop_duplicates()
 
 
