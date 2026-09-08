@@ -35,20 +35,13 @@ def greeks(spot: float, strike: float, iv_pct: float, days_to_expiry: float, opt
     d1 = (log(spot / strike) + (rate + 0.5 * sigma * sigma) * t) / (sigma * sqrt(t))
     d2 = d1 - sigma * sqrt(t)
     pdf = _norm_pdf(d1)
-    if option_type == "CE":
-        delta = _N.cdf(d1)
-    else:
-        delta = _N.cdf(d1) - 1.0
+    delta = _N.cdf(d1) if option_type == "CE" else _N.cdf(d1) - 1.0
     theta_year = -(spot * pdf * sigma) / (2 * sqrt(t))
     if option_type == "CE":
         theta_year -= rate * strike * exp(-rate * t) * _N.cdf(d2)
     else:
         theta_year += rate * strike * exp(-rate * t) * _N.cdf(-d2)
-    return {
-        "delta": float(delta),
-        "theta_day": float(theta_year / 365.0),
-        "theta_hour": float(theta_year / 365.0 / 6.25),
-    }
+    return {"delta": float(delta), "theta_day": float(theta_year / 365.0), "theta_hour": float(theta_year / 365.0 / 6.25)}
 
 def _prepare(df: pd.DataFrame) -> pd.DataFrame:
     x = df.copy()
@@ -64,6 +57,9 @@ def _prepare(df: pd.DataFrame) -> pd.DataFrame:
 def _nearest_ts(day: pd.DataFrame, hhmm: str):
     session = day["timestamp"].dt.date.iloc[0]
     target = pd.Timestamp(f"{session} {hhmm}")
+    tz = getattr(day["timestamp"].dt, "tz", None)
+    if tz is not None:
+        target = target.tz_localize(tz)
     after = day.loc[day["timestamp"] >= target, "timestamp"]
     if not after.empty:
         return after.iloc[0]
@@ -78,7 +74,7 @@ def _select_delta(snapshot: pd.DataFrame, side: str, target: float):
     for idx, row in snapshot[snapshot["option_type"] == side].iterrows():
         dte = max((row["expiry"] - row["timestamp"].date()).days + 0.01, 0.01)
         g = greeks(float(row["spot"]), float(row["strike"]), float(row["iv"]), dte, side)
-        if g and 0 < float(row["close"]):
+        if g and float(row["close"]) > 0:
             candidates.append((idx, abs(abs(g["delta"]) - target), g))
     if not candidates:
         return None
@@ -140,7 +136,6 @@ def backtest_theta(df: pd.DataFrame, strategy: str = "Dynamic Theta Strangle", e
         if ce is None or pe is None:
             continue
         ce_k, pe_k = float(ce["strike"]), float(pe["strike"])
-        ce_in, pe_in = float(ce["close"]), float(pe["close"])
         wing_ce = wing_pe = None
         hedge_cost = 0.0
         if strategy == "Dynamic Theta Iron Condor":
@@ -154,10 +149,13 @@ def backtest_theta(df: pd.DataFrame, strategy: str = "Dynamic Theta Strangle", e
             continue
         exit_debit = ce_out + pe_out
         if wing_ce is not None and wing_pe is not None:
-            hce, hpe = _price(day, exit_ts, "CE", float(wing_ce["strike"])), _price(day, exit_ts, "PE", float(wing_pe["strike"]))
+            hce = _price(day, exit_ts, "CE", float(wing_ce["strike"]))
+            hpe = _price(day, exit_ts, "PE", float(wing_pe["strike"]))
             if hce is None or hpe is None:
                 continue
             exit_debit -= hce + hpe
+        entry_credit = ce_in = float(ce["close"])
+        pe_in = float(pe["close"])
         entry_credit = ce_in + pe_in - hedge_cost
         pnl = entry_credit - exit_debit
         trades.append(Trade(str(session_date), strategy, str(entry_ts), str(exit_ts), str(ce["expiry"]), spot, ce_k, pe_k, entry_credit, exit_debit, pnl, pnl * lot_size))
@@ -170,16 +168,7 @@ def backtest_theta(df: pd.DataFrame, strategy: str = "Dynamic Theta Strangle", e
     result["drawdown_rupees"] = result["cum_pnl_rupees"] - result["peak_rupees"]
     wins = result.loc[result["pnl_rupees"] > 0, "pnl_rupees"]
     losses = result.loc[result["pnl_rupees"] < 0, "pnl_rupees"]
-    summary = {
-        "trades": int(len(result)),
-        "win_rate": float((result["pnl_rupees"] > 0).mean() * 100),
-        "net_pnl": float(result["pnl_rupees"].sum()),
-        "avg_day": float(result["pnl_rupees"].mean()),
-        "profit_factor": float(wins.sum() / abs(losses.sum())) if len(losses) and losses.sum() else None,
-        "max_drawdown": float(result["drawdown_rupees"].min()),
-        "best_day": float(result["pnl_rupees"].max()),
-        "worst_day": float(result["pnl_rupees"].min()),
-    }
+    summary = {"trades": int(len(result)), "win_rate": float((result["pnl_rupees"] > 0).mean() * 100), "net_pnl": float(result["pnl_rupees"].sum()), "avg_day": float(result["pnl_rupees"].mean()), "profit_factor": float(wins.sum() / abs(losses.sum())) if len(losses) and losses.sum() else None, "max_drawdown": float(result["drawdown_rupees"].min()), "best_day": float(result["pnl_rupees"].max()), "worst_day": float(result["pnl_rupees"].min())}
     return result, summary
 
 def compare_strategies(df: pd.DataFrame, strategies: Iterable[str] | None = None, **kwargs):
