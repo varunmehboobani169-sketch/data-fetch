@@ -124,14 +124,33 @@ with tab2:
         wing_distance = st.number_input("Iron Condor wing distance (50-point strikes)", min_value=1, max_value=10, value=4, step=1)
     st.info("The engine ranks eligible CE and PE contracts by theta income per hour relative to premium (theta efficiency). Delta does not choose the strike; it only limits the allowed risk range.")
 
-    bt_token = st.text_input("Dhan Access Token for historical data", type="password", key="bt_token")
+    st.markdown("#### Data source")
+    source = st.radio("Use", ["Existing cached data", "Upload CSV/Parquet", "Fetch from Dhan"], horizontal=True, key="bt_source")
+    bt_token = ""
+    if source == "Upload CSV/Parquet":
+        uploads = st.file_uploader("Upload 1-minute NIFTY option files", type=["csv", "parquet"], accept_multiple_files=True, key="bt_uploads")
+        if uploads:
+            frames = []
+            for uploaded in uploads:
+                try:
+                    frames.append(pd.read_csv(uploaded) if uploaded.name.lower().endswith(".csv") else pd.read_parquet(uploaded))
+                except Exception as exc:
+                    st.warning(f"Could not read {uploaded.name}: {exc}")
+            if frames:
+                st.session_state["theta_df"] = pd.concat(frames, ignore_index=True)
+                st.success(f"Loaded {len(st.session_state['theta_df']):,} rows from uploaded files.")
+    elif source == "Fetch from Dhan":
+        bt_token = st.text_input("Dhan Access Token for historical data", type="password", key="bt_token")
+    else:
+        st.caption("Uses whatever historical rows are already cached in the app.")
+
     fetch_col1, fetch_col2 = st.columns([1, 3])
     with fetch_col1:
-        fetch_clicked = st.button("Fetch / refresh data", type="primary", use_container_width=True)
+        fetch_clicked = st.button("Fetch / refresh data", type="primary", use_container_width=True, disabled=source != "Fetch from Dhan")
     with fetch_col2:
-        st.caption("Historical collector stores 1-minute data in the app's data/ cache. The current rolling-option feed is limited to ATM±10 in this project.")
+        st.caption("Dhan's rolling historical-options endpoint supports up to 30 days per request and ATM±10 for index options.")
 
-    if fetch_clicked:
+    if fetch_clicked and source == "Fetch from Dhan":
         if bt_start > bt_end:
             st.error("Start date must be on or before end date.")
         elif min_delta >= max_delta:
@@ -151,6 +170,11 @@ with tab2:
                 st.session_state["theta_df"] = result.frame
                 if result.errors:
                     st.warning(f"Loaded data with {len(result.errors)} fetch errors. Existing cached files were retained where possible.")
+                    with st.expander("Show first fetch errors"):
+                        for err in result.errors[:10]:
+                            st.code(err)
+                        if len(result.errors) > 10:
+                            st.caption(f"Showing first 10 of {len(result.errors)} errors.")
                 else:
                     st.success(f"Loaded {len(result.frame):,} one-minute option rows.")
             except Exception as exc:
@@ -158,11 +182,12 @@ with tab2:
 
     if "theta_df" in st.session_state and not st.session_state["theta_df"].empty:
         data = st.session_state["theta_df"]
-        mask = (data["timestamp"].dt.date >= bt_start) & (data["timestamp"].dt.date <= bt_end)
+        mask = (data["timestamp"].dt.date >= bt_start) & (data["timestamp"].dt.date <= bt_end) if "timestamp" in data.columns and pd.api.types.is_datetime64_any_dtype(data["timestamp"]) else pd.Series(True, index=data.index)
         data = data.loc[mask].copy()
         if data.empty:
             st.warning("No cached rows exist inside the selected date range.")
         else:
+            st.caption(f"Research dataset: {len(data):,} rows")
             if st.button("Run theta comparison", type="secondary", use_container_width=True):
                 with st.spinner("Running theta-first strategies..."):
                     comparison, details = compare_strategies(
@@ -205,4 +230,4 @@ with tab2:
             st.markdown("#### Detailed P&L")
             st.dataframe(d, use_container_width=True, hide_index=True)
     else:
-        st.info("Fetch or load historical option data, then run the theta comparison.")
+        st.info("Load historical option data, then run the theta comparison.")
