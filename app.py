@@ -27,7 +27,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="big">📌 NIFTY Option Selling</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub">Strategy recommendation, Greeks and theta backtesting</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub">Strategy recommendation, Greeks and theta-first backtesting</div>', unsafe_allow_html=True)
 
 tab1, tab2 = st.tabs(["Live Greeks", "Theta Backtest"])
 
@@ -99,7 +99,7 @@ with tab1:
 
 with tab2:
     st.markdown("### Theta Backtest Lab")
-    st.caption("The backtest uses only information available at the entry timestamp to choose strikes, then measures actual option-price P&L at exit.")
+    st.caption("Theta is the primary strike-selection objective. Delta is used only as a safety boundary against excessive gamma exposure. The backtest uses information available at entry and actual option prices at exit.")
 
     b1, b2, b3 = st.columns(3)
     with b1:
@@ -114,18 +114,28 @@ with tab2:
     with b5:
         lot_size = st.number_input("Lot size", min_value=1, value=65, step=1)
     with b6:
-        target_delta = st.number_input("Target delta", min_value=0.10, max_value=0.50, value=0.30, step=0.05)
+        max_delta = st.number_input("Maximum absolute delta (risk filter)", min_value=0.20, max_value=0.70, value=0.50, step=0.05)
+
+    st.markdown("#### Theta selection controls")
+    c7, c8 = st.columns(2)
+    with c7:
+        min_delta = st.number_input("Minimum absolute delta (risk filter)", min_value=0.05, max_value=0.40, value=0.10, step=0.05)
+    with c8:
+        wing_distance = st.number_input("Iron Condor wing distance (50-point strikes)", min_value=1, max_value=10, value=4, step=1)
+    st.info("The engine ranks eligible CE and PE contracts by theta income per hour relative to premium (theta efficiency). Delta does not choose the strike; it only limits the allowed risk range.")
 
     bt_token = st.text_input("Dhan Access Token for historical data", type="password", key="bt_token")
     fetch_col1, fetch_col2 = st.columns([1, 3])
     with fetch_col1:
         fetch_clicked = st.button("Fetch / refresh data", type="primary", use_container_width=True)
     with fetch_col2:
-        st.caption("Historical collector stores 1-minute data in the app's data/ cache. Dhan's rolling-option feed is currently limited to ATM±10 in this project.")
+        st.caption("Historical collector stores 1-minute data in the app's data/ cache. The current rolling-option feed is limited to ATM±10 in this project.")
 
     if fetch_clicked:
         if bt_start > bt_end:
             st.error("Start date must be on or before end date.")
+        elif min_delta >= max_delta:
+            st.error("Minimum delta risk filter must be lower than the maximum.")
         elif not bt_token.strip():
             st.error("Enter the Dhan Access Token first.")
         else:
@@ -154,8 +164,16 @@ with tab2:
             st.warning("No cached rows exist inside the selected date range.")
         else:
             if st.button("Run theta comparison", type="secondary", use_container_width=True):
-                with st.spinner("Running theta strategies..."):
-                    comparison, details = compare_strategies(data, entry_time=bt_entry.strftime("%H:%M"), exit_time=bt_exit.strftime("%H:%M"), target_delta=float(target_delta), lot_size=int(lot_size))
+                with st.spinner("Running theta-first strategies..."):
+                    comparison, details = compare_strategies(
+                        data,
+                        entry_time=bt_entry.strftime("%H:%M"),
+                        exit_time=bt_exit.strftime("%H:%M"),
+                        min_abs_delta=float(min_delta),
+                        max_abs_delta=float(max_delta),
+                        wing_distance=int(wing_distance),
+                        lot_size=int(lot_size),
+                    )
                 st.session_state["theta_comparison"] = comparison
                 st.session_state["theta_details"] = details
 
