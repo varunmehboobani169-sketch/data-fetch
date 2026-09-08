@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date
 import streamlit as st
 
+from regime_engine import MarketInputs, classify
+
 st.set_page_config(
     page_title="NIFTY Intraday Option Selling Engine",
     page_icon="📈",
@@ -23,9 +25,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ---------- Session state ----------
 for key, default in {
-    "dhan_client_id": "",
+    "dhan_client_id": "1113195747",
     "dhan_token": "",
     "connected": False,
     "live_mode": False,
@@ -34,10 +35,9 @@ for key, default in {
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ---------- Sidebar ----------
 with st.sidebar:
     st.header("🔐 Dhan Login")
-    st.caption("Credentials are kept only in the Streamlit session and are never written to GitHub.")
+    st.caption("Client ID is pre-filled. Access Token stays only in this Streamlit session.")
 
     cid = st.text_input("Dhan Client ID", value=st.session_state.dhan_client_id)
     tok = st.text_input("Dhan Access Token", value=st.session_state.dhan_token, type="password")
@@ -51,17 +51,12 @@ with st.sidebar:
             st.session_state.last_action = "Connected" if st.session_state.connected else "Missing credentials"
     with c2:
         if st.button("Clear", use_container_width=True):
-            st.session_state.dhan_client_id = ""
             st.session_state.dhan_token = ""
             st.session_state.connected = False
             st.session_state.live_mode = False
             st.session_state.last_action = "Disconnected"
-            st.rerun()
 
-    if st.session_state.connected:
-        st.success("Dhan session ready")
-    else:
-        st.info("Disconnected")
+    st.success("Dhan session ready") if st.session_state.connected else st.info("Disconnected")
 
     st.divider()
     st.header("Engine Controls")
@@ -79,24 +74,36 @@ with st.sidebar:
     timeframe = st.selectbox("Timeframe", ["1 minute"], disabled=True)
 
     st.divider()
-    st.subheader("Position Monitor")
+    st.subheader("Paper Position Monitor")
     position_enabled = st.toggle("Enable position monitor", value=False)
-    if position_enabled:
-        st.selectbox("Position", ["None", "Short Strangle", "Iron Condor", "Short Call", "Short Put"])
-        st.number_input("Reference quantity", min_value=1, value=1, step=1)
+    position_type = st.selectbox(
+        "Position structure",
+        ["None", "Iron Condor", "Bull Put Spread", "Bear Call Spread", "Short Strangle"],
+        disabled=not position_enabled,
+    )
+    quantity = st.number_input("Reference quantity", min_value=1, value=1, step=1, disabled=not position_enabled)
 
-# ---------- Hero ----------
 st.markdown(
     """
     <div class="hero">
       <h1 style="margin-bottom:4px;">📈 NIFTY Intraday Option Selling Engine</h1>
-      <div class="small">Theta + Vega + IV + market regime • Decision-first dashboard prototype</div>
+      <div class="small">Theta + Vega + IV + market regime • regime-based paper-trading prototype</div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-# ---------- Status strip ----------
+# Prototype inputs. These are deliberately labeled as sample values until the Dhan
+# historical/live data adapter is connected and validated.
+proto = MarketInputs(
+    trend_score=0.05,
+    realized_vol_percentile=38,
+    iv_percentile=72,
+    iv_change=-0.35,
+    theta_vega=0.34,
+)
+result = classify(proto)
+
 c0, c1, c2, c3, c4 = st.columns(5)
 c0.metric("NIFTY", "25,200", "+0.42%")
 c1.metric("ATM", "25,200")
@@ -104,50 +111,63 @@ c2.metric("Expiry", "10-Sep-2026")
 c3.metric("Time", "11:05")
 c4.metric("Data", "1 min")
 
-# ---------- Main decision ----------
 left, right = st.columns([1.55, 1])
 with left:
     st.markdown('<div class="section">Selling Environment</div>', unsafe_allow_html=True)
     a, b, c, d = st.columns(4)
-    a.metric("Theta", "+4.82", "Strong")
-    b.metric("Vega", "1.41", "Low risk")
-    c.metric("Theta / Vega", "3.42x", "Favourable")
-    d.metric("IV Regime", "Falling", "Good")
+    a.metric("Theta / Vega", f"{proto.theta_vega:.2f}x", "Research input")
+    b.metric("IV Percentile", f"{proto.iv_percentile:.0f}%", "Research input")
+    c.metric("IV Change", f"{proto.iv_change:+.2f}", "Research input")
+    d.metric("Realized Vol", f"{proto.realized_vol_percentile:.0f}th pct", "Research input")
 
     st.markdown("### 🎯 Selling Score")
-    st.progress(0.84)
+    st.progress(result.selling_score / 100)
     s1, s2, s3 = st.columns(3)
-    s1.metric("Score", "84 / 100")
-    s2.metric("Regime", "Sideways")
-    s3.metric("Action", "SELL SELECTIVELY")
+    s1.metric("Score", f"{result.selling_score} / 100")
+    s2.metric("Regime", result.regime)
+    s3.metric("Action", result.action)
 
-    st.markdown('<div class="section">Market Regime</div>', unsafe_allow_html=True)
-    regime = st.dataframe(
-        {
-            "Engine": ["Trend", "Volatility", "IV", "Theta", "Vega"],
-            "Reading": ["Sideways", "Low → Stable", "High → Falling", "Strong", "Low"],
-            "Signal": ["Neutral", "Favourable", "Favourable", "Favourable", "Favourable"],
-        },
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.markdown('<div class="section">Market Regime Decision Tree</div>', unsafe_allow_html=True)
+    regime_rows = {
+        "Engine": ["Trend", "Realized Vol", "IV", "Theta/Vega"],
+        "Reading": [
+            "Neutral / Sideways",
+            f"{proto.realized_vol_percentile:.0f}th percentile",
+            f"{proto.iv_percentile:.0f}th percentile • {proto.iv_change:+.2f}",
+            f"{proto.theta_vega:.2f}x",
+        ],
+        "Interpretation": [
+            result.regime,
+            "Contained" if proto.realized_vol_percentile < 50 else "Elevated",
+            "Falling" if proto.iv_change < 0 else "Rising",
+            "Favorable" if proto.theta_vega >= 0.30 else "Selective",
+        ],
+    }
+    st.dataframe(regime_rows, use_container_width=True, hide_index=True)
 
 with right:
-    st.markdown('<div class="section">⚡ Recommended Setup</div>', unsafe_allow_html=True)
-    st.success("CONDITIONS FAVOUR PREMIUM SELLING")
-    st.write("**Preferred structure:** Iron Condor")
-    st.write("**Short CE:** 25,400")
-    st.write("**Short PE:** 25,000")
-    st.write("**Outer wings:** 25,500 / 24,900")
+    st.markdown('<div class="section">⚡ Strategy Selection</div>', unsafe_allow_html=True)
+    if result.selling_score >= 80:
+        st.success("CONDITIONS FAVOUR PREMIUM SELLING")
+    elif result.selling_score >= 65:
+        st.warning("SELECTIVE PREMIUM SELLING")
+    else:
+        st.error("AVOID NEW PREMIUM SELLING")
+
+    st.write(f"**Preferred structure:** {result.preferred_strategy}")
+    st.write("**Short-side selection:** determined by regime + strike ranking")
+    st.write("**Wings:** determined by risk budget and tested distance rules")
     st.divider()
-    st.metric("Estimated Greek edge", "+₹1,220")
-    st.metric("Theta / Vega", "3.42x")
-    st.caption("Illustrative values only — not yet connected to live calculations.")
+    st.metric("Selling Score", f"{result.selling_score}/100")
+    st.metric("Theta/Vega", f"{proto.theta_vega:.2f}x")
+    st.caption("Prototype decision only. No live orders are placed.")
 
-# ---------- Strike ranking ----------
+    st.markdown("**Why this decision?**")
+    for reason in result.reasons:
+        st.write(f"• {reason}")
+
 st.markdown("---")
-st.markdown('<div class="section">🏆 Strike Ranking</div>', unsafe_allow_html=True)
-
+st.markdown('<div class="section">🏆 Strike Ranking — Prototype Layout</div>', unsafe_allow_html=True)
 ranking = {
     "Rank": [1, 2, 3, 4, 5, 6],
     "Option": ["25,400 CE", "25,350 CE", "25,000 PE", "24,950 PE", "25,450 CE", "24,900 PE"],
@@ -160,7 +180,6 @@ ranking = {
 }
 st.dataframe(ranking, use_container_width=True, hide_index=True)
 
-# ---------- Charts placeholder ----------
 ch1, ch2 = st.columns(2)
 with ch1:
     st.markdown('<div class="section">Theta / Vega Trend</div>', unsafe_allow_html=True)
@@ -169,37 +188,37 @@ with ch2:
     st.markdown('<div class="section">NIFTY / ATM Context</div>', unsafe_allow_html=True)
     st.line_chart({"NIFTY": [25120, 25135, 25150, 25142, 25170, 25188, 25195, 25200], "ATM": [25100, 25100, 25150, 25150, 25150, 25200, 25200, 25200]})
 
-# ---------- Position monitor ----------
 st.markdown("---")
-st.markdown('<div class="section">🛡 Position Monitor</div>', unsafe_allow_html=True)
-if position_enabled:
+st.markdown('<div class="section">🛡 Sample Portfolio</div>', unsafe_allow_html=True)
+if position_enabled and position_type != "None":
     p1, p2, p3, p4 = st.columns(4)
-    p1.metric("Position", "IRON CONDOR")
-    p2.metric("MTM", "+₹1,840", "+₹260")
-    p3.metric("Theta", "+₹1,220")
-    p4.metric("Vega risk", "Moderate")
-    st.warning("VEGA RISK: monitor for acceleration")
+    p1.metric("Structure", position_type)
+    p2.metric("Quantity", str(quantity))
+    p3.metric("Paper MTM", "+₹1,840")
+    p4.metric("Risk", "Monitoring")
+    st.info("This is a paper/research position monitor. It does not place orders with Dhan.")
 else:
-    st.info("Position monitor is off. Turn it on from the left panel when you want to track an existing trade.")
+    st.info("Enable the paper position monitor from the left panel to track a sample strategy.")
 
-# ---------- Data / implementation roadmap ----------
 st.markdown("---")
-with st.expander("What this prototype will become"):
+with st.expander("Research roadmap"):
     st.markdown(
         """
-**Phase 1 — Data:** connect the dashboard to Dhan 1-minute NIFTY/option history and live data.
+**Phase 1:** Connect Dhan 1-minute historical/live option data.
 
-**Phase 2 — Greeks:** calculate and validate Theta, Vega, IV, Delta and Gamma at each minute.
+**Phase 2:** Calculate Greeks minute-by-minute for the actual strike of every contract.
 
-**Phase 3 — Engine:** build the actual Selling Score from Theta/Vega efficiency, IV regime, trend, realized volatility and OI.
+**Phase 3:** Validate the regime engine and Theta/Vega thresholds on historical NIFTY data.
 
-**Phase 4 — Strike selector:** rank CE/PE strikes and suggest the best structure.
+**Phase 4:** Rank strikes and select Iron Condor / Bull Put / Bear Call / other structures by regime.
 
-**Phase 5 — Backtest:** test the score and strike-selection rules on 2024–2026 historical data before using them live.
+**Phase 5:** Run a paper portfolio continuously and record entry, adjustment, exit, P&L and drawdown.
+
+**Phase 6:** Backtest out-of-sample before considering any live execution layer.
         """
     )
 
 st.caption(
     f"Mode: {'Live' if st.session_state.live_mode else 'Historical'} • Date: {hist_date:%d-%b-%Y} • "
-    f"Requested universe: ATM−{strike_range}…ATM+{strike_range} • {timeframe}"
+    f"Requested universe: ATM−{strike_range}…ATM+{strike_range} • {timeframe} • {expiry}"
 )
