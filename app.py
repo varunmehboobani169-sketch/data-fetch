@@ -51,7 +51,7 @@ with st.sidebar:
     mode = st.radio("Data mode", ["Historical", "Live"], horizontal=True)
     st.session_state.live_mode = mode == "Live"
     hist_date = st.date_input("Research date", value=date.today()) if not st.session_state.live_mode else date.today()
-    expiry = st.selectbox("Expiry", ["Nearest weekly", "Next weekly", "Select later"])
+    expiry_mode = st.selectbox("Expiry", ["Nearest weekly", "Next weekly", "Select later"])
     strike_range = st.slider("Strike universe", 1, 20, 20)
     sides = st.multiselect("Option sides", ["CE", "PE"], default=["CE", "PE"])
     timeframe = st.selectbox("Timeframe", ["1 minute"], disabled=True)
@@ -96,7 +96,7 @@ if live_nifty is not None:
 else:
     c0.metric("NIFTY LTP", "—", "Not connected")
     c1.metric("ATM", "—")
-c2.metric("Expiry", expiry)
+c2.metric("Expiry", expiry_mode)
 c3.metric("Quote status", "Live" if live_nifty is not None else "Waiting")
 c4.metric("Data", "1 min")
 c5.metric("Refresh", "On demand")
@@ -104,7 +104,7 @@ c5.metric("Refresh", "On demand")
 if live_error:
     st.error(f"Dhan LTP error: {live_error}")
 elif not st.session_state.connected:
-    st.info("Connect to Dhan in the left panel to populate the real NIFTY LTP.")
+    st.info("Connect to Dhan in the left panel to populate the real NIFTY LTP and option prices.")
 
 left, right = st.columns([1.55, 1])
 with left:
@@ -143,33 +143,67 @@ with right:
         st.write(f"• {reason}")
 
 st.markdown("---")
-st.markdown('<div class="section">🏆 Strike Ranking — Live Premiums</div>', unsafe_allow_html=True)
-ranking_offsets = [4, 3, -4, -5, 5, -6]
-ranking_sides = ["CE", "CE", "PE", "PE", "CE", "PE"]
+st.markdown('<div class="section">🏆 Strike Ranking — Live Option Prices</div>', unsafe_allow_html=True)
 
-ltp_map: dict[str, float] = {}
+# Build the ranking from the real NIFTY LTP and the nearest weekly expiry in Dhan's instrument master.
+ranking_offsets = sorted(set([-10, -8, -6, -4, -3, -2, -1, 0, 1, 2, 3, 4, 6, 8, 10]))
+ranking_sides = ["CE", "PE"] if set(sides) == {"CE", "PE"} else (sides or ["CE"])
+
+master = pd.DataFrame()
+exp_date = None
 contract_rows: list[dict] = []
-if atm is not None and st.session_state.connected and st.session_state.dhan_token:
+ltp_map: dict[str, float] = {}
+ranking_error = ""
+
+if live_nifty is not None and st.session_state.connected and st.session_state.dhan_token:
     try:
         master = fetch_instrument_master()
         exp_date = nearest_weekly_expiry(master, date.today())
-        strikes = [atm + offset * 50 for offset in ranking_offsets]
-        contracts = strike_contracts(master, exp_date, strikes, sorted(set(ranking_sides))) if exp_date else pd.DataFrame()
-        if not contracts.empty:
-            ids = contracts["SECURITY_ID"].astype(str).tolist()
-            ltp_map = client.option_ltps(ids)
-            contract_rows = [{"security_id": str(r.SECURITY_ID), "strike": float(r.STRIKE), "option_type": r.OPTION_TYPE, "expiry": r.EXPIRY} for r in contracts.itertuples(index=False)]
+        if exp_date is None:
+            raise RuntimeError("No nearest weekly NIFTY expiry found in the Dhan instrument master.")
+        strikes = [float(atm + offset * 50) for offset in ranking_offsets]
+        contracts = strike_contracts(master, exp_date, strikes, ranking_sides)
+        if contracts.empty:
+            raise RuntimeError(f"No option contracts found for expiry {exp_date} and requested strikes.")
+        ids = contracts["SECURITY_ID"].astype(str).tolist()
+        ltp_map = client.option_ltps(ids)
+        for r in contracts.itertuples(index=False):
+            contract_rows.append({
+                "security_id": str(r.SECURITY_ID),
+                "strike": float(r.STRIKE),
+                "option_type": str(r.OPTION_TYPE).upper(),
+                "expiry": r.EXPIRY,
+            })
     except Exception as exc:
-        st.warning(f"Could not load live option premiums: {exc}")
+        ranking_error = str(exc)
+
+if ranking_error:
+    st.warning(f"Strike ranking price lookup failed: {ranking_error}")
 
 rows = []
-for rank, offset, side in zip(range(1, 7), ranking_offsets, ranking_sides):
-    strike = atm + offset * 50 if atm is not None else None
-    match = next((x for x in contract_rows if x["strike"] == strike and x["option_type"] == side), None)
-    ltp = ltp_map.get(match["security_id"]) if match else None
-    rows.append({"Rank": rank, "Option": f"{strike:,.0f} {side}" if strike is not None else "—", "Expiry": str(match["expiry"]) if match else "—", "Offset": offset, "LTP": f"₹{ltp:,.2f}" if ltp is not None else "—", "Theta": "—", "Vega": "—", "Theta/Vega": "—", "Sell Score": "Prototype", "Status": "Awaiting Greeks"})
-st.dataframe(rows, use_container_width=True, hide_index=True)
-st.caption("LTP is live from Dhan's F&O market-quote endpoint. Greek columns remain disabled until the real option-chain Greek engine is connected.")
+for rank, offset in enumerate(ranking_offsets, 1):
+    for side in ranking_sides:
+        strike = (atm + offset * 50) if atm is not None else None
+        match = next((x for x in contract_rows if x["strike"] == float(strike) and x["option_type"] == side), None) if strike is not None else None
+        ltp = ltp_map.get(match["security_id"]) if match else None
+        rows.append({
+            "Rank": rank,
+            "Option": f"{strike:,.0f} {side}" if strike is not None else "—",
+            "Expiry": str(match["expiry"]) if match else (str(exp_date) if exp_date else "—"),
+            "Offset": f"{offset:+d}",
+            "LTP": f"₹{ltp:,.2f}" if ltp is not None else "Unavailable",
+            "Security ID": match["security_id"] if match else "—",
+            "Theta": "—",
+            "Vega": "—",
+            "Theta/Vega": "—",
+            "Sell Score": "Pending",
+        })
+
+st.dataframe(rows, use_container_width=True, hide_index=True, height=520)
+if st.session_state.connected and live_nifty is not None:
+    st.caption("Strike and expiry are resolved from the live NIFTY LTP and Dhan instrument master. LTP is fetched from Dhan F&O market quotes. A row marked Unavailable means Dhan did not return an LTP for that resolved security ID.")
+else:
+    st.caption("Connect to Dhan to populate live strike prices.")
 
 ch1, ch2 = st.columns(2)
 with ch1:
@@ -211,4 +245,4 @@ with st.expander("Research roadmap"):
 **Phase 6:** Backtest out-of-sample before considering any live execution layer.
 """)
 
-st.caption(f"Mode: {'Live' if st.session_state.live_mode else 'Historical'} • Date: {hist_date:%d-%b-%Y} • Requested universe: ATM−{strike_range}…ATM+{strike_range} • {timeframe} • {expiry}")
+st.caption(f"Mode: {'Live' if st.session_state.live_mode else 'Historical'} • Date: {hist_date:%d-%b-%Y} • Requested universe: ATM−{strike_range}…ATM+{strike_range} • {timeframe} • {expiry_mode}")
