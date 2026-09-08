@@ -162,25 +162,29 @@ with tab2:
     comparison = st.session_state.get("theta_comparison")
     if isinstance(comparison, pd.DataFrame) and not comparison.empty:
         view = comparison.copy()
-        view["win_rate"] = view["win_rate"].map(lambda x: f"{x:.1f}%")
-        view["net_pnl"] = view["net_pnl"].map(lambda x: f"₹{x:,.0f}")
-        view["avg_day"] = view["avg_day"].map(lambda x: f"₹{x:,.0f}")
-        view["max_drawdown"] = view["max_drawdown"].map(lambda x: f"₹{x:,.0f}")
-        view["best_day"] = view["best_day"].map(lambda x: f"₹{x:,.0f}")
-        view["worst_day"] = view["worst_day"].map(lambda x: f"₹{x:,.0f}")
-        view["profit_factor"] = view["profit_factor"].map(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
+        display_view = view.copy()
+        display_view["win_rate"] = display_view["win_rate"].map(lambda x: f"{x:.1f}%")
+        for col in ["net_pnl", "avg_day", "max_drawdown", "best_day", "worst_day"]:
+            display_view[col] = display_view[col].map(lambda x: f"₹{x:,.0f}")
+        display_view["profit_factor"] = display_view["profit_factor"].map(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
         st.markdown("#### Strategy comparison")
-        st.dataframe(view, use_container_width=True, hide_index=True)
+        st.dataframe(display_view, use_container_width=True, hide_index=True)
+
+        st.download_button("Download P&L Summary CSV", view.to_csv(index=False), file_name="theta_pnl_summary.csv", mime="text/csv", use_container_width=True)
 
         details = st.session_state.get("theta_details", {})
         names = [n for n in view["Strategy"] if n in details and not details[n].empty]
         if names:
-            selected = st.selectbox("Equity curve", names)
-            d = details[selected]
+            selected = st.selectbox("Equity curve / trade report", names)
+            d = details[selected].copy()
             fig = px.line(d, x="date", y="cum_pnl_rupees", title=selected)
             fig.update_yaxes(title="Cumulative P&L (₹)")
             fig.update_xaxes(title="Date")
             st.plotly_chart(fig, use_container_width=True)
-            st.download_button("Download trade log CSV", d.to_csv(index=False), file_name="theta_trade_log.csv", mime="text/csv")
+
+            st.download_button("Download Detailed Trade P&L CSV", d.to_csv(index=False), file_name=f"theta_{selected.lower().replace(' ', '_')}_trades.csv", mime="text/csv", use_container_width=True)
+
+            st.markdown("#### Detailed P&L")
+            st.dataframe(d, use_container_width=True, hide_index=True)
     else:
         st.info("Fetch or load historical option data, then run the theta comparison.")
