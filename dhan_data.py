@@ -50,6 +50,24 @@ class DhanClient:
                     time.sleep(1)
         raise last or RuntimeError("Dhan request failed")
 
+    def get(self, path: str, retries: int = 2) -> dict:
+        """Small read-only helper used to verify a Data API subscription."""
+        last: Exception | None = None
+        for attempt in range(retries):
+            try:
+                response = self.session.get(f"{API}{path}", timeout=30)
+                response.raise_for_status()
+                return response.json()
+            except Exception as exc:
+                last = exc
+                if attempt + 1 < retries:
+                    import time
+                    time.sleep(1)
+        raise last or RuntimeError("Dhan request failed")
+
+    def profile(self) -> dict:
+        return self.get("/profile")
+
     def expiry_list(self) -> list[str]:
         body = self.post("/optionchain/expirylist", {"UnderlyingScrip": int(NIFTY_ID), "UnderlyingSeg": "IDX_I"})
         values = (body.get("data") or []) if isinstance(body, dict) else []
@@ -210,3 +228,4 @@ class HistoricalCollector:
         df = df[(df["timestamp"].dt.date >= start) & (df["timestamp"].dt.date <= end)]
         df = df.drop_duplicates(["timestamp", "option_type", "strike_offset"]).sort_values(["timestamp", "option_type", "strike_offset"]).reset_index(drop=True)
         return FetchResult(df, errors)
+
