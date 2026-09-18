@@ -44,7 +44,9 @@ def _find_column(frame: pd.DataFrame, *names: str) -> str | None:
 def normalise_mcx_registry(frame: pd.DataFrame) -> pd.DataFrame:
     """Return the minimum contract registry needed for Dhan historical calls."""
     security = _find_column(frame, "SECURITY_ID", "SEM_SECURITY_ID")
-    symbol = _find_column(frame, "UNDERLYING_SYMBOL", "SYMBOL_NAME", "DISPLAY_NAME")
+    # ``symbol`` is also accepted because the Streamlit selector passes the
+    # already-normalised registry back to the resumable collector.
+    symbol = _find_column(frame, "UNDERLYING_SYMBOL", "SYMBOL_NAME", "DISPLAY_NAME", "SYMBOL")
     expiry = _find_column(frame, "SM_EXPIRY_DATE", "SEM_EXPIRY_DATE", "EXPIRY_DATE", "EXPIRY")
     exchange = _find_column(frame, "EXCH_ID", "EXCHANGE")
     instrument = _find_column(frame, "INSTRUMENT", "SEM_INSTRUMENT_NAME")
