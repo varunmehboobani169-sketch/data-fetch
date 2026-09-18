@@ -143,6 +143,7 @@ class CollectionResult:
     manifest: pd.DataFrame
     errors: list[str]
     output_dir: Path
+    combined_csv: Path | None = None
 
 
 class MCXIntradayCollector:
@@ -160,6 +161,7 @@ class MCXIntradayCollector:
         end: date,
         interval: str,
         overwrite: bool = False,
+        combine_csv: bool = False,
         progress: Callable[[int, int, str], None] | None = None,
     ) -> CollectionResult:
         contracts = normalise_mcx_registry(contracts)
@@ -167,6 +169,7 @@ class MCXIntradayCollector:
         total = len(jobs)
         manifest_rows: list[dict[str, object]] = []
         errors: list[str] = []
+        saved_files: list[Path] = []
 
         for position, (contract, window_start, window_end) in enumerate(jobs, start=1):
             expiry_label = contract["expiry"].isoformat() if pd.notna(contract["expiry"]) else "unknown-expiry"
@@ -179,6 +182,8 @@ class MCXIntradayCollector:
             try:
                 if output.exists() and not overwrite:
                     rows = len(pd.read_parquet(output, columns=["timestamp"]))
+                    if rows:
+                        saved_files.append(output)
                 else:
                     frame = intraday_call(self.client, str(contract["security_id"]), window_start, window_end, interval)
                     rows = len(frame)
@@ -190,6 +195,7 @@ class MCXIntradayCollector:
                         frame["instrument"] = MCX_INSTRUMENT
                         frame.to_parquet(output, index=False)
                         status = "saved"
+                        saved_files.append(output)
                     else:
                         status = "empty"
             except Exception as exc:
@@ -219,5 +225,15 @@ class MCXIntradayCollector:
 
         manifest = pd.DataFrame(manifest_rows)
         manifest.to_csv(self.data_dir / "collection_manifest.csv", index=False)
-        return CollectionResult(manifest=manifest, errors=errors, output_dir=self.data_dir)
+
+        combined_csv: Path | None = None
+        if combine_csv and saved_files:
+            frames = [pd.read_parquet(path) for path in saved_files]
+            combined = pd.concat(frames, ignore_index=True)
+            combined = combined.drop_duplicates(["timestamp", "security_id"]).sort_values(["timestamp", "security_id"])
+            symbols = "_".join(sorted(contracts["symbol"].unique().tolist()))
+            filename = f"{_safe_name(symbols)}_{start.isoformat()}__{end.isoformat()}_{interval}m.csv"
+            combined_csv = self.data_dir / filename
+            combined.to_csv(combined_csv, index=False)
+        return CollectionResult(manifest=manifest, errors=errors, output_dir=self.data_dir, combined_csv=combined_csv)
 
