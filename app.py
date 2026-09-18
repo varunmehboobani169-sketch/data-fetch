@@ -6,11 +6,127 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from dhan_data import DhanClient
+from mcx_data import MCXIntradayCollector, live_mcx_futures_master, normalise_mcx_registry
 from research.backtest_engine import BacktestConfig, run_backtest
 from research.data_adapter import load_uploaded_files, normalize_frame
 from research.strategy_loader import load_strategy_from_source
 
-st.set_page_config(page_title="NIFTY Research Lab", page_icon="🧪", layout="wide")
+st.set_page_config(page_title="Project Friday Data Lab", page_icon="🧪", layout="wide")
+
+
+def render_mcx_collector() -> None:
+    st.title("MCX Futures Intraday Collector")
+    st.caption("Contract-specific Dhan candles · 2024 onward · resumable Parquet storage")
+
+    st.warning(
+        "Important coverage rule: Dhan's live master currently lists active MCX FUTCOM contracts only. "
+        "It cannot by itself enumerate contracts that expired in 2024–2026. Use an archived Dhan master CSV "
+        "when you obtain one; the collector will then test each exact historical security ID."
+    )
+
+    with st.sidebar:
+        st.header("Dhan session")
+        client_id = st.text_input("Client ID", key="mcx_client_id")
+        access_token = st.text_input("Access token", type="password", key="mcx_access_token")
+        st.caption("Credentials remain in this browser session only and are never written to the repository.")
+
+    left, right = st.columns([1, 1])
+    with left:
+        if st.button("Load current MCX futures master", use_container_width=True):
+            try:
+                st.session_state["mcx_master"] = live_mcx_futures_master()
+                st.success(f"Loaded {len(st.session_state['mcx_master']):,} current MCX FUTCOM contracts.")
+            except Exception as exc:
+                st.error(f"Could not load Dhan's public master: {exc}")
+    with right:
+        if st.button("Test Dhan Data API", use_container_width=True):
+            try:
+                profile = DhanClient(client_id, access_token).profile()
+                data = profile.get("data") if isinstance(profile, dict) else profile
+                st.success("Dhan session is valid.")
+                st.json(data if data else profile)
+            except Exception as exc:
+                st.error(f"Dhan session test failed: {exc}")
+
+    archive = st.file_uploader(
+        "Optional: archived Dhan MCX contract-master CSV",
+        type=["csv"],
+        help="Required for true expired-contract coverage. It must include SECURITY_ID and UNDERLYING_SYMBOL or SYMBOL_NAME.",
+    )
+    if archive is not None:
+        try:
+            st.session_state["mcx_master"] = normalise_mcx_registry(pd.read_csv(archive, low_memory=False))
+            st.success(f"Archived registry loaded: {len(st.session_state['mcx_master']):,} MCX futures contracts.")
+        except Exception as exc:
+            st.error(f"Archived registry is not usable: {exc}")
+
+    master = st.session_state.get("mcx_master")
+    if master is None:
+        st.info("Load the current MCX master or upload an archived master to select contracts.")
+        return
+
+    master = master.copy()
+    symbols = sorted(master["symbol"].dropna().unique().tolist())
+    selected_symbols = st.multiselect("MCX commodities", symbols, default=symbols)
+    selected = master[master["symbol"].isin(selected_symbols)].copy()
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        start = st.date_input("From", value=pd.Timestamp("2024-01-01").date(), min_value=pd.Timestamp("2020-01-01").date())
+    with c2:
+        end = st.date_input("To", value=pd.Timestamp.today().date())
+    with c3:
+        interval = st.selectbox("Candle interval", ["1", "5", "15", "25", "60"], index=0, format_func=lambda x: f"{x} minute")
+    overwrite = st.checkbox("Re-fetch existing saved windows", value=False)
+
+    if end < start:
+        st.error("The end date must be on or after the start date.")
+        return
+
+    windows_per_contract = ((end - start).days // 90) + 1
+    st.write(f"**Queue:** {len(selected):,} contracts × {windows_per_contract:,} maximum 90-day windows = up to **{len(selected) * windows_per_contract:,} API calls**.")
+    st.dataframe(selected, use_container_width=True, hide_index=True)
+
+    if st.button("Collect intraday MCX futures data", type="primary", use_container_width=True):
+        try:
+            client = DhanClient(client_id, access_token)
+            bar = st.progress(0, text="Preparing collection…")
+            detail = st.empty()
+
+            def update(done: int, total: int, message: str) -> None:
+                bar.progress(done / total, text=message)
+                detail.caption(message)
+
+            result = MCXIntradayCollector(client).collect(
+                selected, start, end, interval, overwrite=overwrite, progress=update
+            )
+            bar.progress(1.0, text="Collection finished")
+            st.success(f"Collection finished. Files are stored under {result.output_dir}.")
+            st.dataframe(result.manifest, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download collection manifest",
+                result.manifest.to_csv(index=False).encode("utf-8"),
+                file_name="mcx_collection_manifest.csv",
+                mime="text/csv",
+            )
+            if result.errors:
+                st.warning(f"{len(result.errors):,} windows failed. The run is resumable; retrying skips saved windows.")
+                st.download_button(
+                    "Download failed windows",
+                    "\n".join(result.errors).encode("utf-8"),
+                    file_name="mcx_collection_errors.txt",
+                    mime="text/plain",
+                )
+        except Exception as exc:
+            st.error(f"Collection failed before it could start: {exc}")
+            st.exception(exc)
+
+
+page = st.sidebar.radio("Workspace", ["MCX data collector", "NIFTY backtest lab"])
+if page == "MCX data collector":
+    render_mcx_collector()
+    st.stop()
 
 st.title("🧪 NIFTY Research Lab")
 st.caption("Choose a dataset → upload/select a Python strategy → run the backtest")
@@ -180,3 +296,4 @@ st.caption(
     "Python strategies are executed by the Streamlit app, so only upload strategy files you trust. "
     "For permanent datasets, storing compressed Parquet files in the repository avoids re-uploading them each run."
 )
+
