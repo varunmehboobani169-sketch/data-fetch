@@ -10,6 +10,11 @@ intraday endpoint with `MCX_COMM` and `FUTCOM`. It supports 1, 5, 15, 25 and
 60-minute bars, OI, 90-day request windows, throttling, resume-safe Parquet
 storage and a downloadable manifest.
 
+For a small validation run, enable **Strict GOLD pilot**. It requests only
+1-minute GOLD futures from 1 January 2024 and produces one CSV while retaining
+the exact security ID and expiry on every row. It is deliberately not labelled
+as a continuous Gold future.
+
 ### Coverage boundary
 
 The Dhan master fetched today lists *currently tradable* MCX futures. It does
