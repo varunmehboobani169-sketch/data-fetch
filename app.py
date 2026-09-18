@@ -68,7 +68,18 @@ def render_mcx_collector() -> None:
 
     master = master.copy()
     symbols = sorted(master["symbol"].dropna().unique().tolist())
-    selected_symbols = st.multiselect("MCX commodities", symbols, default=symbols)
+    gold_pilot = st.checkbox(
+        "Strict GOLD pilot — 1-minute data since 01-Jan-2024; produce one contract-preserving CSV",
+        value=False,
+        help="This does not fabricate a continuous Gold series. Each row remains tagged with the exact Dhan security ID and expiry.",
+    )
+    selected_symbols = st.multiselect("MCX commodities", symbols, default=symbols, disabled=gold_pilot)
+    if gold_pilot:
+        if "GOLD" not in symbols:
+            st.error("The currently loaded contract registry has no GOLD futures.")
+            return
+        selected_symbols = ["GOLD"]
+        st.info("Pilot mode uses only GOLD and keeps all returned contracts separate in the CSV.")
     selected = master[master["symbol"].isin(selected_symbols)].copy()
 
     c1, c2, c3 = st.columns(3)
@@ -78,7 +89,15 @@ def render_mcx_collector() -> None:
         end = st.date_input("To", value=pd.Timestamp.today().date())
     with c3:
         interval = st.selectbox("Candle interval", ["1", "5", "15", "25", "60"], index=0, format_func=lambda x: f"{x} minute")
+    if gold_pilot:
+        start = pd.Timestamp("2024-01-01").date()
+        interval = "1"
     overwrite = st.checkbox("Re-fetch existing saved windows", value=False)
+    combine_csv = st.checkbox(
+        "Create one combined CSV for this collection",
+        value=gold_pilot,
+        help="Best for small pilots. The CSV retains security_id and expiry; it is not a continuous-futures series.",
+    )
 
     if end < start:
         st.error("The end date must be on or after the start date.")
@@ -99,7 +118,7 @@ def render_mcx_collector() -> None:
                 detail.caption(message)
 
             result = MCXIntradayCollector(client).collect(
-                selected, start, end, interval, overwrite=overwrite, progress=update
+                selected, start, end, interval, overwrite=overwrite, combine_csv=combine_csv, progress=update
             )
             bar.progress(1.0, text="Collection finished")
             st.success(f"Collection finished. Files are stored under {result.output_dir}.")
@@ -110,6 +129,13 @@ def render_mcx_collector() -> None:
                 file_name="mcx_collection_manifest.csv",
                 mime="text/csv",
             )
+            if result.combined_csv is not None:
+                st.download_button(
+                    "Download single contract-preserving OHLC CSV",
+                    result.combined_csv.read_bytes(),
+                    file_name=result.combined_csv.name,
+                    mime="text/csv",
+                )
             if result.errors:
                 st.warning(f"{len(result.errors):,} windows failed. The run is resumable; retrying skips saved windows.")
                 st.download_button(
