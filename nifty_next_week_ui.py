@@ -154,8 +154,14 @@ if "manifest" in st.session_state:
         st.dataframe(data.head(2000), use_container_width=True, height=360)
 
         csv_bytes = data.to_csv(index=False).encode("utf-8")
-        parquet_buffer = io.BytesIO()
-        data.to_parquet(parquet_buffer, index=False)
+        parquet_bytes = None
+        parquet_error = None
+        try:
+            parquet_buffer = io.BytesIO()
+            data.to_parquet(parquet_buffer, index=False)
+            parquet_bytes = parquet_buffer.getvalue()
+        except Exception as exc:
+            parquet_error = str(exc)
 
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -166,7 +172,7 @@ if "manifest" in st.session_state:
                 name = f"{expiry}_{int(float(strike))}_{option_type}.csv"
                 zf.writestr(name, grp.to_csv(index=False).encode("utf-8"))
 
-        d1, d2, d3 = st.columns(3)
+        d1, d2 = st.columns(2)
         d1.download_button(
             "Download Combined CSV",
             data=csv_bytes,
@@ -175,19 +181,23 @@ if "manifest" in st.session_state:
             use_container_width=True,
         )
         d2.download_button(
-            "Download Parquet",
-            data=parquet_buffer.getvalue(),
-            file_name="nifty_next_week_options_1m.parquet",
-            mime="application/octet-stream",
-            use_container_width=True,
-        )
-        d3.download_button(
             "Download ZIP by Contract",
             data=zip_buffer.getvalue(),
             file_name="nifty_next_week_options_1m.zip",
             mime="application/zip",
             use_container_width=True,
         )
+
+        if parquet_bytes is not None:
+            st.download_button(
+                "Download Parquet",
+                data=parquet_bytes,
+                file_name="nifty_next_week_options_1m.parquet",
+                mime="application/octet-stream",
+                use_container_width=True,
+            )
+        elif parquet_error:
+            st.caption("Parquet export is optional and unavailable on this deployment. CSV and ZIP downloads still work.")
 
         st.subheader("Quick quality checks")
         q1, q2, q3 = st.columns(3)
