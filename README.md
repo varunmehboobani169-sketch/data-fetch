@@ -6,6 +6,7 @@ This repository now contains only the code required to discover next-week NIFTY 
 
 ## Files
 
+- `app.py` — Streamlit Cloud / local entrypoint
 - `nifty_next_week_ui.py` — Streamlit user interface
 - `dhan_next_week.py` — DhanHQ API integration and data collection logic
 - `requirements.txt` — Python dependencies
@@ -27,7 +28,7 @@ This repository now contains only the code required to discover next-week NIFTY 
 
 ```bash
 pip install -r requirements.txt
-streamlit run nifty_next_week_ui.py
+streamlit run app.py
 ```
 
 Enter your Dhan Client ID and Access Token in the sidebar.
